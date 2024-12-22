@@ -2,8 +2,7 @@ import cv2
 import numpy as np
 import pyautogui
 import time
-import keyboard
-import threading
+from pynput import keyboard
 from PIL import Image
 import sys
 import os
@@ -25,10 +24,15 @@ width = 3840
 
 def get_screen_width():
     """獲取螢幕寬度解析度"""
-    user32 = ctypes.windll.user32
-    screen_width = user32.GetSystemMetrics(0)  # 螢幕寬度
-    print(f"螢幕解析度寬度：{screen_width}")
-    return screen_width
+    try:
+        # 移除 Windows 專用的程式碼
+        # 改用 pyautogui 來獲取螢幕解析度
+        screen_width = pyautogui.size()[0]  # 螢幕寬度
+        print(f"螢幕解析度寬度：{screen_width}")
+        return screen_width
+    except Exception as e:
+        print(f"獲取螢幕解析度時發生錯誤：{e}")
+        return 1920  # 返回預設值
 
 def get_btn_folder():
     global width
@@ -263,8 +267,10 @@ def process_buttons_and_templates(retry_template, retry_confirm_template, skip_t
 
 def toggle_start_stop():
     global stop_script, start_script
-    while True:
-        if keyboard.is_pressed('F9'):
+    
+    def on_press(key):
+        global stop_script, start_script
+        if key == keyboard.Key.f9:
             if start_script:
                 print("按下F9鍵。停止腳本...")
                 stop_script = True
@@ -274,6 +280,10 @@ def toggle_start_stop():
                 stop_script = False
                 start_script = True
             time.sleep(0.5)
+
+    # 啟動鍵盤監聽
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
 
 def get_template_count():
     templates_dir = os.path.join(os.getcwd(), "templates")
@@ -299,7 +309,7 @@ def main():
     global save_star_screenshot, save_target_screenshot
 
     try:
-        threading.Thread(target=toggle_start_stop, daemon=True).start()
+        toggle_start_stop()
 
         # 從config讀取target_count
         config = load_config()
