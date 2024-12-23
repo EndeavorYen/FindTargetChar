@@ -87,15 +87,7 @@ def load_image(image_path):
     return image
 
 def template_matching(screenshot, template, threshold=0.8, use_rect=True):
-    """
-    統一的模板匹配函式，支援不同解析度
-    
-    參數:
-        screenshot: 螢幕截圖影像 (BGR 格式)
-        template: 模板影像 (BGR 格式)
-        threshold: 匹配的門檻值
-        use_rect: 是否合併重疊區域
-    """
+    """原始的模板匹配函式，用於按鈕和星星等簡單元素"""
     # 計算縮放比例
     scale_factor = screenshot.shape[1] / 1920
     
@@ -155,30 +147,100 @@ def template_matching(screenshot, template, threshold=0.8, use_rect=True):
     
     return []
 
-def star_matching(screenshot, template):
-    """5星角色匹配
-    Args:
-        screenshot: 螢幕截圖影像 (BGR 格式)
-        template: 5星角色範例圖片
-    Returns:
-        list: 匹配點的中心座標列表
-    """
-    global width
-    if width > 1920:
-        threshold = 0.8
+def template_matching_advanced(screenshot, template, threshold=0.8):
+    """進階的模板匹配函式，專門用於角色圖片匹配"""
+    scale_factor = screenshot.shape[1] / 1920
+    
+    # 根據解析度調整縮放範圍
+    if scale_factor > 1.5:
+        scale_ranges = [scale_factor * x for x in [0.95, 0.97, 0.99, 1.0, 1.01, 1.03, 1.05]]
     else:
-        threshold = 0.78
-    return template_matching(screenshot, template, threshold, True)
+        scale_ranges = [scale_factor * x for x in [0.93, 0.96, 0.98, 1.0, 1.02, 1.04, 1.07]]
+    
+    all_points = []
+    all_scores = []
+    
+    for scale in scale_ranges:
+        new_width = int(template.shape[1] * scale)
+        new_height = int(template.shape[0] * scale)
+        scaled_template = cv2.resize(template, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        
+        methods = [
+            (lambda s, t: (cv2.cvtColor(s, cv2.COLOR_BGR2GRAY), 
+                         cv2.cvtColor(t, cv2.COLOR_BGR2GRAY)), 1.0),
+            (lambda s, t: (cv2.Canny(cv2.cvtColor(s, cv2.COLOR_BGR2GRAY), 100, 200),
+                         cv2.Canny(cv2.cvtColor(t, cv2.COLOR_BGR2GRAY), 100, 200)), 0.6),
+            (lambda s, t: (cv2.cvtColor(s, cv2.COLOR_BGR2HSV)[:,:,0],
+                         cv2.cvtColor(t, cv2.COLOR_BGR2HSV)[:,:,0]), 0.7),
+        ]
+        
+        for preprocess, weight in methods:
+            try:
+                img1, img2 = preprocess(screenshot, scaled_template)
+                result = cv2.matchTemplate(img1, img2, cv2.TM_CCOEFF_NORMED)
+                loc = np.where(result >= threshold)
+                points = list(zip(*loc[::-1]))
+                
+                if points:
+                    w, h = img2.shape[::-1]
+                    for pt in points:
+                        score = result[pt[1], pt[0]] * weight
+                        center_pt = (pt[0] + w//2, pt[1] + h//2)
+                        all_points.append(center_pt)
+                        all_scores.append(score)
+            except Exception as e:
+                print(f"預處理方法發生錯誤: {e}")
+                continue
+    
+    if all_points:
+        all_points = np.array(all_points)
+        all_scores = np.array(all_scores)
+        
+        clustering = DBSCAN(eps=40, min_samples=1).fit(all_points)
+        
+        final_points = []
+        for label in set(clustering.labels_):
+            if label == -1:
+                continue
+            mask = clustering.labels_ == label
+            cluster_points = all_points[mask]
+            cluster_scores = all_scores[mask]
+            
+            weights = cluster_scores / np.sum(cluster_scores)
+            center = np.average(cluster_points, weights=weights, axis=0)
+            
+            if np.mean(cluster_scores) > threshold * 0.8:
+                final_points.append(tuple(map(int, center)))
+        
+        final_points.sort(key=lambda p: p[1])
+        return final_points
+    
+    return []
 
 def btn_matching(screenshot, template):
-    """按鈕匹配
-    Args:
-        screenshot: 螢幕截圖影像 (BGR 格式)
-        template: 按鈕範例圖片
-    Returns:
-        list: 匹配點的中心座標列表
-    """
+    """按鈕匹配，使用原始版本"""
     return template_matching(screenshot, template, 0.6, False)
+
+def star_matching(screenshot, template):
+    """5星角色匹配，使用原始版本"""
+    global width
+    threshold = 0.8 if width > 1920 else 0.78
+    return template_matching(screenshot, template, threshold, True)
+
+def character_matching(screenshot, template):
+    """角色圖片匹配，使用進階版本"""
+    global width
+    if width > 1920:
+        threshold = 0.68
+    elif width > 1440:
+        threshold = 0.65
+    else:
+        threshold = 0.62
+    
+    template = cv2.GaussianBlur(template, (3, 3), 0)
+    screenshot = cv2.GaussianBlur(screenshot, (3, 3), 0)
+    
+    return template_matching_advanced(screenshot, template, threshold)
 
 def check_star_count(screenshot, template):
     """檢查是否找到足夠的5星角色
@@ -209,24 +271,6 @@ def check_star_count(screenshot, template):
     else:
         print("未找到任何5星角色")
         return False
-
-def character_matching(screenshot, template):
-    """角色圖片匹配
-    Args:
-        screenshot: 螢幕截圖影像 (BGR 格式)
-        template: 角色範例圖片
-    Returns:
-        list: 匹配點的中心座標列表
-    """
-    global width
-    if width > 1920:
-        threshold = 0.7  # 降低4K解析度的閾值
-    elif width > 1440:
-        threshold = 0.68  # 降低2K解析度的閾值
-    else:
-        threshold = 0.65  # 降低1080p的閾值
-        
-    return template_matching(screenshot, template, threshold, True)
 
 def check_templates(screenshot, templates):
     """檢查是否找到足夠的角色圖片
