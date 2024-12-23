@@ -12,6 +12,8 @@ import ctypes
 from sklearn.cluster import DBSCAN
 import argparse
 import glob
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 # 用來停止腳本的標誌
 stop_script = False
@@ -86,6 +88,103 @@ def load_image(image_path):
         print(f"已載入圖片：{image_path}")
     return image
 
+def process_scale(screenshot, template, scale, methods, threshold):
+    """處理單一縮放比例的所有預處理方法"""
+    new_width = int(template.shape[1] * scale)
+    new_height = int(template.shape[0] * scale)
+    scaled_template = cv2.resize(template, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+    
+    scale_points = []
+    scale_scores = []
+    
+    for preprocess, weight in methods:
+        try:
+            img1, img2 = preprocess(screenshot, scaled_template)
+            result = cv2.matchTemplate(img1, img2, cv2.TM_CCOEFF_NORMED)
+            
+            loc = np.where(result >= threshold)
+            points = list(zip(*loc[::-1]))
+            
+            if points:
+                w, h = img2.shape[::-1]
+                for pt in points:
+                    score = result[pt[1], pt[0]] * weight
+                    if score > threshold * 0.9:
+                        center_pt = (pt[0] + w//2, pt[1] + h//2)
+                        scale_points.append(center_pt)
+                        scale_scores.append(score)
+                        
+        except Exception as e:
+            print(f"預處理方法發生錯誤: {e}")
+            continue
+    
+    return scale_points, scale_scores
+
+def template_matching_advanced(screenshot, template, threshold=0.8):
+    """使用多執行緒的進階模板匹配函式"""
+    scale_factor = screenshot.shape[1] / 1920
+    
+    # 調整縮放範圍
+    if scale_factor > 1.5:
+        scale_ranges = [scale_factor * x for x in [0.95, 0.97, 0.99, 1.0, 1.01, 1.03, 1.05]]
+    else:
+        scale_ranges = [scale_factor * x for x in [0.93, 0.96, 0.98, 1.0, 1.02, 1.04, 1.07]]
+    
+    # 預處理方法組合
+    methods = [
+        (lambda s, t: (cv2.cvtColor(s, cv2.COLOR_BGR2GRAY),
+                      cv2.cvtColor(t, cv2.COLOR_BGR2GRAY)), 1.0),
+        (lambda s, t: (cv2.Canny(cv2.cvtColor(s, cv2.COLOR_BGR2GRAY), 100, 200),
+                      cv2.Canny(cv2.cvtColor(t, cv2.COLOR_BGR2GRAY), 100, 200)), 0.6),
+        (lambda s, t: (cv2.Canny(cv2.cvtColor(s, cv2.COLOR_BGR2GRAY), 50, 150),
+                      cv2.Canny(cv2.cvtColor(t, cv2.COLOR_BGR2GRAY), 50, 150)), 0.6),
+        (lambda s, t: (cv2.cvtColor(s, cv2.COLOR_BGR2HSV)[:,:,0],
+                      cv2.cvtColor(t, cv2.COLOR_BGR2HSV)[:,:,0]), 0.7),
+        (lambda s, t: (cv2.cvtColor(s, cv2.COLOR_BGR2HSV)[:,:,1],
+                      cv2.cvtColor(t, cv2.COLOR_BGR2HSV)[:,:,1]), 0.5)
+    ]
+    
+    all_points = []
+    all_scores = []
+    
+    # 使用線程池處理不同的縮放比例
+    with ThreadPoolExecutor(max_workers=min(len(scale_ranges), 4)) as executor:
+        process_func = partial(process_scale, screenshot, template, methods=methods, threshold=threshold)
+        results = list(executor.map(process_func, scale_ranges))
+        
+        # 合併所有結果
+        for points, scores in results:
+            all_points.extend(points)
+            all_scores.extend(scores)
+    
+    if all_points:
+        all_points = np.array(all_points)
+        all_scores = np.array(all_scores)
+        
+        # 群集處理
+        clustering = DBSCAN(eps=30, min_samples=2).fit(all_points)
+        
+        final_points = []
+        for label in set(clustering.labels_):
+            if label == -1:
+                continue
+            mask = clustering.labels_ == label
+            cluster_points = all_points[mask]
+            cluster_scores = all_scores[mask]
+            
+            mean_score = np.mean(cluster_scores)
+            if mean_score > threshold * 0.95:
+                weights = cluster_scores / np.sum(cluster_scores)
+                center = np.average(cluster_points, weights=weights, axis=0)
+                final_points.append(tuple(map(int, center)))
+        
+        if final_points:
+            final_points.sort(key=lambda p: p[1])
+            
+        return final_points
+    
+    return []
+
 def template_matching(screenshot, template, threshold=0.8, use_rect=True):
     """原始的模板匹配函式，用於按鈕和星星等簡單元素"""
     # 計算縮放比例
@@ -143,102 +242,6 @@ def template_matching(screenshot, template, threshold=0.8, use_rect=True):
         
         # 根據y座標排序
         final_points.sort(key=lambda p: p[1])
-        return final_points
-    
-    return []
-
-def template_matching_advanced(screenshot, template, threshold=0.8):
-    """進階的模板匹配函式，專門用於角色圖片匹配"""
-    scale_factor = screenshot.shape[1] / 1920
-    
-    # 調整回更嚴格的縮放範圍
-    if scale_factor > 1.5:
-        scale_ranges = [scale_factor * x for x in [0.95, 0.97, 0.99, 1.0, 1.01, 1.03, 1.05]]
-    else:
-        scale_ranges = [scale_factor * x for x in [0.93, 0.96, 0.98, 1.0, 1.02, 1.04, 1.07]]
-    
-    # 預處理圖像
-    screenshot_gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
-    screenshot_canny = cv2.Canny(screenshot_gray, 100, 200)
-    screenshot_hsv = cv2.cvtColor(screenshot, cv2.COLOR_BGR2HSV)
-    
-    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-    template_canny = cv2.Canny(template_gray, 100, 200)
-    template_hsv = cv2.cvtColor(template, cv2.COLOR_BGR2HSV)
-    
-    all_points = []
-    all_scores = []
-    
-    # 更嚴格的匹配方法組合
-    methods = [
-        # 灰度圖匹配
-        (lambda s, t: (cv2.cvtColor(s, cv2.COLOR_BGR2GRAY),
-                      cv2.cvtColor(t, cv2.COLOR_BGR2GRAY)), 1.0),
-        # Canny 邊緣檢測（兩種參數組合）
-        (lambda s, t: (cv2.Canny(cv2.cvtColor(s, cv2.COLOR_BGR2GRAY), 100, 200),
-                      cv2.Canny(cv2.cvtColor(t, cv2.COLOR_BGR2GRAY), 100, 200)), 0.6),
-        (lambda s, t: (cv2.Canny(cv2.cvtColor(s, cv2.COLOR_BGR2GRAY), 50, 150),
-                      cv2.Canny(cv2.cvtColor(t, cv2.COLOR_BGR2GRAY), 50, 150)), 0.6),
-        # HSV 色調和飽和度
-        (lambda s, t: (cv2.cvtColor(s, cv2.COLOR_BGR2HSV)[:,:,0],
-                      cv2.cvtColor(t, cv2.COLOR_BGR2HSV)[:,:,0]), 0.7),
-        (lambda s, t: (cv2.cvtColor(s, cv2.COLOR_BGR2HSV)[:,:,1],
-                      cv2.cvtColor(t, cv2.COLOR_BGR2HSV)[:,:,1]), 0.5)
-    ]
-    
-    for scale in scale_ranges:
-        new_width = int(template.shape[1] * scale)
-        new_height = int(template.shape[0] * scale)
-        scaled_template = cv2.resize(template, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-        
-        for preprocess, weight in methods:
-            try:
-                img1, img2 = preprocess(screenshot, scaled_template)
-                result = cv2.matchTemplate(img1, img2, cv2.TM_CCOEFF_NORMED)
-                
-                # 提高匹配要求
-                loc = np.where(result >= threshold)
-                points = list(zip(*loc[::-1]))
-                
-                if points:
-                    w, h = img2.shape[::-1]
-                    for pt in points:
-                        score = result[pt[1], pt[0]] * weight
-                        # 只保留高分數的匹配點
-                        if score > threshold * 0.9:
-                            center_pt = (pt[0] + w//2, pt[1] + h//2)
-                            all_points.append(center_pt)
-                            all_scores.append(score)
-                            
-            except Exception as e:
-                print(f"預處理方法發生錯誤: {e}")
-                continue
-    
-    if all_points:
-        all_points = np.array(all_points)
-        all_scores = np.array(all_scores)
-        
-        # 更嚴格的群集參數
-        clustering = DBSCAN(eps=30, min_samples=2).fit(all_points)
-        
-        final_points = []
-        for label in set(clustering.labels_):
-            if label == -1:
-                continue
-            mask = clustering.labels_ == label
-            cluster_points = all_points[mask]
-            cluster_scores = all_scores[mask]
-            
-            # 提高群集分數要求
-            mean_score = np.mean(cluster_scores)
-            if mean_score > threshold * 0.95:  # 提高分數門檻
-                weights = cluster_scores / np.sum(cluster_scores)
-                center = np.average(cluster_points, weights=weights, axis=0)
-                final_points.append(tuple(map(int, center)))
-        
-        if final_points:
-            final_points.sort(key=lambda p: p[1])
-            
         return final_points
     
     return []
