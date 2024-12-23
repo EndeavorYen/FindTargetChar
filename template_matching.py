@@ -9,6 +9,9 @@ import os
 from datetime import datetime
 from pyautogui import screenshot as take_screenshot
 import ctypes
+from sklearn.cluster import DBSCAN
+import argparse
+import glob
 
 # 用來停止腳本的標誌
 stop_script = False
@@ -85,40 +88,73 @@ def load_image(image_path):
 
 def template_matching(screenshot, template, threshold=0.8, use_rect=True):
     """
-    統一的模板匹配函式
-
+    統一的模板匹配函式，支援不同解析度
+    
     參數:
         screenshot: 螢幕截圖影像 (BGR 格式)
         template: 模板影像 (BGR 格式)
         threshold: 匹配的門檻值
-        use_rect: 是否合併重疊區域 (True 使用 groupRectangles, False 直接回傳匹配點)
-
-    回傳:
-        final_points: 匹配點的中心座標列表
+        use_rect: 是否合併重疊區域
     """
-
-    screenshot_gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
-    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-
-    result = cv2.matchTemplate(screenshot_gray, template_gray, cv2.TM_CCOEFF_NORMED)
-    loc = np.where(result >= threshold)
-
-    w, h = template_gray.shape[::-1]
-
-    points = []
-    if use_rect:
-        for pt in zip(*loc[::-1]):
-            points.append([pt[0], pt[1], w, h])
-
-        rects, _ = cv2.groupRectangles(points, groupThreshold=1, eps=0.5)
-        final_points = [(int(x + w / 2), int(y + h / 2)) for x, y, w, h in rects]
-
-        return final_points
-    else:
-        for pt in zip(*loc[::-1]):
-            points.append((pt[0] + w // 2, pt[1] + h // 2))
-        return points
+    # 計算縮放比例
+    scale_factor = screenshot.shape[1] / 1920
     
+    # 根據解析度調整縮放範圍
+    if scale_factor > 1.5:
+        scale_ranges = [scale_factor * x for x in [0.98, 1.0, 1.02]]  # 4K解析度用較少的縮放範圍
+    else:
+        scale_ranges = [scale_factor * x for x in [0.95, 1.0, 1.05]]  # 減少縮放範圍，提高準確度
+    
+    all_points = []
+    for scale in scale_ranges:
+        # 重新調整模板大小
+        new_width = int(template.shape[1] * scale)
+        new_height = int(template.shape[0] * scale)
+        scaled_template = cv2.resize(template, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        
+        # 轉換為灰度圖
+        screenshot_gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+        template_gray = cv2.cvtColor(scaled_template, cv2.COLOR_BGR2GRAY)
+        
+        # 執行模板匹配
+        result = cv2.matchTemplate(screenshot_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+        loc = np.where(result >= threshold)
+        points = list(zip(*loc[::-1]))
+        
+        if not points:
+            continue
+            
+        w, h = template_gray.shape[::-1]
+        if use_rect:
+            rect_points = [[pt[0], pt[1], w, h] for pt in points]
+            if rect_points:
+                rects, _ = cv2.groupRectangles(rect_points, groupThreshold=1, eps=0.5)
+                points = [(int(x + w/2), int(y + h/2)) for x, y, w, h in rects]
+                all_points.extend(points)
+        else:
+            points = [(pt[0] + w//2, pt[1] + h//2) for pt in points]
+            all_points.extend(points)
+    
+    # 合併相近的點
+    if all_points:
+        all_points = np.array(all_points)
+        clustering = DBSCAN(eps=30, min_samples=1).fit(all_points)
+        
+        final_points = []
+        for label in set(clustering.labels_):
+            if label == -1:
+                continue
+            mask = clustering.labels_ == label
+            cluster_points = all_points[mask]
+            center = np.mean(cluster_points, axis=0)
+            final_points.append(tuple(map(int, center)))
+        
+        # 根據y座標排序
+        final_points.sort(key=lambda p: p[1])
+        return final_points
+    
+    return []
+
 def star_matching(screenshot, template):
     """5星角色匹配
     Args:
@@ -174,6 +210,24 @@ def check_star_count(screenshot, template):
         print("未找到任何5星角色")
         return False
 
+def character_matching(screenshot, template):
+    """角色圖片匹配
+    Args:
+        screenshot: 螢幕截圖影像 (BGR 格式)
+        template: 角色範例圖片
+    Returns:
+        list: 匹配點的中心座標列表
+    """
+    global width
+    if width > 1920:
+        threshold = 0.7  # 降低4K解析度的閾值
+    elif width > 1440:
+        threshold = 0.68  # 降低2K解析度的閾值
+    else:
+        threshold = 0.65  # 降低1080p的閾值
+        
+    return template_matching(screenshot, template, threshold, True)
+
 def check_templates(screenshot, templates):
     """檢查是否找到足夠的角色圖片
     Args:
@@ -190,7 +244,8 @@ def check_templates(screenshot, templates):
     
     match_count = 0
     for template in templates:
-        points = template_matching(screenshot, template)
+        # 改用 character_matching 而不是 template_matching
+        points = character_matching(screenshot, template)
         if points:
             count = len(points)
             match_count += count
@@ -303,10 +358,96 @@ def rewrite_log(iteration, found):
         print(f"寫入記錄檔時發生錯誤: {e}")
         print("繼續執行腳本...")
 
+def test_template_matching():
+    """測試 template_matching 函式的正確性"""
+    print("\n開始測試 template_matching 函式...")
+    
+    # 取得所有模板檔案
+    template_files = glob.glob(os.path.join('templates', 't*.png'))
+    if not template_files:
+        print("templates 資料夾中沒有找到 t*.png 檔案。")
+        return
+        
+    # 取得所有截圖檔案
+    screenshot_files = glob.glob(os.path.join('screenshots', '*.png'))
+    if not screenshot_files:
+        print("screenshots 資料夾中沒有 PNG 檔案供測試。")
+        return
+    
+    # 載入按鈕模板
+    folder = get_btn_folder()
+    star_template = load_image(f'{folder}/5star.png')
+    
+    print(f"\n找到 {len(template_files)} 個模板檔案")
+    print(f"找到 {len(screenshot_files)} 個測試截圖\n")
+    
+    # 對每個截圖進行測試
+    for screenshot_file in screenshot_files:
+        print(f"\n處理截圖：{screenshot_file}")
+        screenshot = cv2.imread(screenshot_file, cv2.IMREAD_COLOR)
+        if screenshot is None:
+            print(f"無法載入截圖：{screenshot_file}")
+            continue
+            
+        # 測試5星辨識
+        star_matches = star_matching(screenshot, star_template)
+        print(f"5星辨識結果: 找到 {len(star_matches)} 個匹配點")
+        if star_matches:
+            print(f"匹配座標: {star_matches}")
+            
+        # 測試角色辨識
+        print("\n角色辨識測試:")
+        for template_file in template_files:
+            template = load_image(template_file)
+            if template is None:
+                continue
+                
+            matches = character_matching(screenshot, template)
+            print(f"{os.path.basename(template_file)}: 找到 {len(matches)} 個匹配點")
+            if matches:
+                print(f"匹配座標: {matches}")
+        print("-" * 50)
+
+def test_character_matching():
+    """測試 character_matching 函式的正確性"""
+    print("開始測試 character_matching 函式...")
+    character_template_path = resource_path('templates/character_template.png')  # 替換為實際的角色模板路徑
+    character_template = load_image(character_template_path)
+    if character_template is None:
+        print(f"無法載入角色模板圖片：{character_template_path}")
+        return
+    
+    screenshot_files = glob.glob(os.path.join('screenshots', '*.png'))
+    if not screenshot_files:
+        print("screenshots 資料夾中沒有 PNG 檔案供測試。")
+        return
+    
+    for screenshot_file in screenshot_files:
+        print(f"\n處理截圖：{screenshot_file}")
+        screenshot = cv2.imread(screenshot_file, cv2.IMREAD_COLOR)
+        if screenshot is None:
+            print(f"無法載入截圖：{screenshot_file}")
+            continue
+        matches = character_matching(screenshot, character_template)
+        print(f"找到 {len(matches)} 個角色匹配點：{matches}")
+
+def run_tests():
+    """執行所有測試"""
+    test_template_matching()
+    test_character_matching()
+
 def main():
     global stop_script, start_script
     global star_match_count, target_match_count
     global save_star_screenshot, save_target_screenshot
+
+    parser = argparse.ArgumentParser(description="Template Matching Script")
+    parser.add_argument('--test', action='store_true', help='啟動測試模式')
+    args = parser.parse_args()
+
+    if args.test:
+        test_template_matching()  # 只需要這一個測試函數就足夠了
+        return
 
     try:
         toggle_start_stop()
