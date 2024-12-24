@@ -295,6 +295,7 @@ class EvaluationMetrics:
         for template_file in template_files:
             template = cv2.imread(template_file)
             if template is None:
+                print(f"無法載入模板 {template_file}")
                 continue
             
             template_name = os.path.basename(template_file).split('.')[0]
@@ -413,6 +414,7 @@ def evaluate_params(args):
     """評估單一參數組合"""
     params, screenshot_files, answers, template_files, star_template = args
     try:
+        print(f"正在評估參數組合: {params}")  # 新增這行來顯示正在測試的參數
         evaluator = EvaluationMetrics(star_template, verbose=False)
         total_tests, correct_stars, correct_matches = evaluator.evaluate_accuracy(
             screenshot_files, answers, template_files, params)
@@ -600,46 +602,18 @@ def prepare_test_cases():
     return test_cases
 
 def character_matching(screenshot, template, params=None):
-    """優化後的角色圖片匹配"""
+    """使用模板匹配來進行角色圖片匹配"""
     if params is None:
         params = load_optimization_params()
     
-    # 1. 模板匹配
-    result = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
-    locations = np.where(result >= params['template_threshold'])
-    points = list(zip(*locations[::-1]))
+    # 使用原始的 template_matching 函數，但調整閾值
+    threshold = params.get('template_threshold', 0.6)
+    # 只在非優化模式下顯示閾值
+    if not sys.argv[1:] or '--optimize' not in sys.argv[1:]:
+        print(f"使用閾值: {threshold}")
+    points = template_matching(screenshot, template, threshold, True)
     
-    # 2. 特徵匹配
-    akaze = cv2.AKAZE_create()
-    kp1, des1 = akaze.detectAndCompute(screenshot, None)
-    kp2, des2 = akaze.detectAndCompute(template, None)
-    
-    if des1 is not None and des2 is not None:
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = bf.match(des2, des1)
-        good_matches = [m for m in matches if m.distance < params['feature_threshold']]
-        
-        if good_matches:
-            matched_points = [kp1[m.trainIdx].pt for m in good_matches]
-            points.extend([(int(x), int(y)) for x, y in matched_points])
-    
-    # 3. 群集處理
-    if points:
-        points = np.array(points)
-        clustering = DBSCAN(eps=params['cluster_threshold'], min_samples=1).fit(points)
-        
-        final_points = []
-        for label in set(clustering.labels_):
-            if label == -1:
-                continue
-            mask = clustering.labels_ == label
-            cluster_points = points[mask]
-            center = np.mean(cluster_points, axis=0)
-            final_points.append(tuple(map(int, center)))
-        
-        return final_points
-    
-    return []
+    return points
 
 def check_star_count(screenshot, template):
     """檢查是否找到足夠的5星角色
