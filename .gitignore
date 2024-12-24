@@ -2,3 +2,4 @@ screenshots/*
 log.txt
 templates/*
 *.pyc
+.DS_Store

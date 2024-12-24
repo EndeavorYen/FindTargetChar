@@ -298,15 +298,19 @@ class EvaluationMetrics:
                 continue
             
             template_name = os.path.basename(template_file).split('.')[0]
+            # 提取基本角色ID (例如: 't2_1' -> 't2')
+            base_character_id = template_name.split('_')[0]
+            
             matches = character_matching(screenshot, template, params)
             if matches:
-                detected_matches.add(template_name)
+                detected_matches.add(base_character_id)
         
         # 驗證角色匹配結果
         expected_matches = expected['matches']
         if expected_matches == set() or expected_matches == {'-'}:
             match_correct = (not detected_matches)
         else:
+            # 將檢測到的角色ID與期望的角色ID進行比對
             match_correct = (detected_matches == expected_matches)
         
         if self.verbose:
@@ -359,10 +363,22 @@ def run_tests():
     if not answers:
         print("無法進行準確度驗證")
         return
-        
-    template_files = glob.glob(os.path.join('templates', 't*.png'))
+    
+    # 修改模板文件搜尋邏輯
+    template_files = []
+    templates_dir = 'templates'
+    if os.path.exists(templates_dir):
+        # 搜尋主目錄中的模板文件
+        template_files.extend(glob.glob(os.path.join(templates_dir, '*.png')))
+        # 搜尋子文件夾中的模板文件
+        template_files.extend(glob.glob(os.path.join(templates_dir, '*', '*.png')))
+    
     if not template_files:
-        print("templates 資料夾中沒有找到 t*.png 檔案。")
+        print("templates 資料夾中沒有找到任何 PNG 檔案。")
+        print("請確認：")
+        print("1. templates 資料夾存在")
+        print("2. 資料夾中有 PNG 格式的模板文件")
+        print("3. 檔案權限正確")
         return
         
     screenshot_files = glob.glob(os.path.join('screenshots', '*.png'))
@@ -376,6 +392,8 @@ def run_tests():
         return
     
     print(f"\n找到 {len(template_files)} 個模板檔案")
+    for template in template_files:
+        print(f"- {template}")
     print(f"找到 {len(screenshot_files)} 個測試截圖\n")
     
     # 建立評估器並執行評估
@@ -431,6 +449,9 @@ def optimize_parameters(test_cases):
     
     star_template = cv2.imread('btns/1920/5star.png')
     
+    # 創建評估器實例
+    evaluator = EvaluationMetrics(star_template, verbose=False)
+
     # 第一階段：粗略搜索
     param_ranges_coarse = {
         'template_threshold': [0.4, 0.5, 0.6, 0.7, 0.8],
@@ -650,11 +671,59 @@ def check_star_count(screenshot, template):
         print("未找到任何5星角色")
         return False
 
-def check_templates(screenshot, templates):
+def get_template_count():
+    """獲取角色資料夾的數量"""
+    templates_dir = os.path.join(os.getcwd(), "templates")
+    if not os.path.exists(templates_dir):
+        print("templates 資料夾不存在！請確認路徑。")
+        return 0
+
+    # 計算 t* 資料夾的數量
+    folders = [f for f in os.listdir(templates_dir) 
+              if os.path.isdir(os.path.join(templates_dir, f)) and f.startswith('t')]
+    return len(folders)
+
+def load_character_templates():
+    """載入所有角色的範本圖片
+    Returns:
+        dict: 角色編號為key，包含該角色所有範本圖片的列表為value
+    """
+    templates_dir = os.path.join(os.getcwd(), "templates")
+    character_templates = {}
+    
+    if not os.path.exists(templates_dir):
+        print("templates 資料夾不存在！")
+        return character_templates
+    
+    # 遍歷每個 t* 資料夾
+    for character_folder in sorted(os.listdir(templates_dir)):
+        if not character_folder.startswith('t'):
+            continue
+            
+        folder_path = os.path.join(templates_dir, character_folder)
+        if not os.path.isdir(folder_path):
+            continue
+            
+        # 載入該角色的所有範本圖片
+        templates = []
+        for img_file in sorted(os.listdir(folder_path)):
+            if img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                img_path = os.path.join(folder_path, img_file)
+                template = cv2.imread(img_path)
+                if template is not None:
+                    templates.append(template)
+                    print(f"已載入範本：{img_path}")
+        
+        if templates:
+            character_templates[character_folder] = templates
+    
+    return character_templates
+
+def check_templates(screenshot, character_templates):
     """檢查是否找到足夠的角色圖片
     Args:
         screenshot: 螢幕截圖影像 (BGR 格式)
-        templates: 角色圖片列表
+        character_templates: 角色範本字典，key為角色編號(t1, t2等)，value為該角色的範本圖片列表
     Returns:
         bool: 是否找到足夠的角色圖片
     """
@@ -665,20 +734,35 @@ def check_templates(screenshot, templates):
         return True
     
     match_count = 0
-    for template in templates:
-        # 改用 character_matching 而不是 template_matching
-        points = character_matching(screenshot, template)
-        if points:
-            count = len(points)
-            match_count += count
-            print(f"找到角色圖片，共找到 {count} 個角色匹配點")
+    matched_characters = set()
+    
+    # 遍歷每個角色
+    for character_id, templates in character_templates.items():
+        character_matched = False
+        
+        # 遍歷該角色的所有範本圖片
+        for template in templates:
+            points = character_matching(screenshot, template)
+            if points:
+                character_matched = True
+                print(f"找到角色 {character_id}")
+                break  # 只要找到該角色的任一範本就可以了
+        
+        if character_matched:
+            matched_characters.add(character_id)
+            match_count = len(matched_characters)
+            
         if match_count >= target_match_count:
-            print(f"已找到至少 {target_match_count} 張角色圖片")
+            print(f"已找到 {match_count} 個不同角色，已滿足條件({target_match_count}個以上)")
+            print(f"匹配到的角色：{', '.join(sorted(matched_characters))}")
             if save_target_screenshot:
                 save_screenshot()
             return True
+    
     if match_count == 0:
-        print("未找到任何匹配角色圖片")
+        print("未找到任何匹配角色")
+    else:
+        print(f"目前找到 {match_count} 個不同角色：{', '.join(sorted(matched_characters))}")
     return False
 
 def capture_screenshot(save_to_file=False):
@@ -716,6 +800,7 @@ def click_buttons( retry_template, retry_confirm_template, skip_template):
     Returns:
         bool: 是否成功點擊按鈕
     """
+    import pyautogui
     global delay_time
     for btn, btn_name in [(retry_template, "retry"), (retry_confirm_template, "retry_confirm"), (skip_template, "skip")]:
         screenshot = capture_screenshot()
@@ -765,13 +850,98 @@ def toggle_start_stop():
         print(f"設置鍵盤監聽時發生錯誤：{e}")
 
 def get_template_count():
+    """獲取角色資料夾的數量"""
     templates_dir = os.path.join(os.getcwd(), "templates")
     if not os.path.exists(templates_dir):
         print("templates 資料夾不存在！請確認路徑。")
         return 0
 
-    files = [f for f in os.listdir(templates_dir) if os.path.isfile(os.path.join(templates_dir, f))]
-    return len(files)
+    # 計算 t* 資料夾的數量
+    folders = [f for f in os.listdir(templates_dir) 
+              if os.path.isdir(os.path.join(templates_dir, f)) and f.startswith('t')]
+    return len(folders)
+
+def load_character_templates():
+    """載入所有角色的範本圖片
+    Returns:
+        dict: 角色編號為key，包含該角色所有範本圖片的列表為value
+    """
+    templates_dir = os.path.join(os.getcwd(), "templates")
+    character_templates = {}
+    
+    if not os.path.exists(templates_dir):
+        print("templates 資料夾不存在！")
+        return character_templates
+    
+    # 遍歷每個 t* 資料夾
+    for character_folder in sorted(os.listdir(templates_dir)):
+        if not character_folder.startswith('t'):
+            continue
+            
+        folder_path = os.path.join(templates_dir, character_folder)
+        if not os.path.isdir(folder_path):
+            continue
+            
+        # 載入該角色的所有範本圖片
+        templates = []
+        for img_file in sorted(os.listdir(folder_path)):
+            if img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                img_path = os.path.join(folder_path, img_file)
+                template = cv2.imread(img_path)
+                if template is not None:
+                    templates.append(template)
+                    print(f"已載入範本：{img_path}")
+        
+        if templates:
+            character_templates[character_folder] = templates
+    
+    return character_templates
+
+def check_templates(screenshot, character_templates):
+    """檢查是否找到足夠的角色圖片
+    Args:
+        screenshot: 螢幕截圖影像 (BGR 格式)
+        character_templates: 角色範本字典，key為角色編號(t1, t2等)，value為該角色的範本圖片列表
+    Returns:
+        bool: 是否找到足夠的角色圖片
+    """
+    if target_match_count == 0:
+        print(f"未設置目標匹配數量，已滿足條件")
+        if save_target_screenshot:
+            save_screenshot()
+        return True
+    
+    match_count = 0
+    matched_characters = set()
+    
+    # 遍歷每個角色
+    for character_id, templates in character_templates.items():
+        character_matched = False
+        
+        # 遍歷該角色的所有範本圖片
+        for template in templates:
+            points = character_matching(screenshot, template)
+            if points:
+                character_matched = True
+                print(f"找到角色 {character_id}")
+                break  # 只要找到該角色的任一範本就可以了
+        
+        if character_matched:
+            matched_characters.add(character_id)
+            match_count = len(matched_characters)
+            
+        if match_count >= target_match_count:
+            print(f"已找到 {match_count} 個不同角色，已滿足條件({target_match_count}個以上)")
+            print(f"匹配到的角色：{', '.join(sorted(matched_characters))}")
+            if save_target_screenshot:
+                save_screenshot()
+            return True
+    
+    if match_count == 0:
+        print("未找到任何匹配角色")
+    else:
+        print(f"目前找到 {match_count} 個不同角色：{', '.join(sorted(matched_characters))}")
+    return False
 
 def rewrite_log(iteration, found):
     try:
@@ -865,6 +1035,10 @@ def main():
 
         templates = [load_image(f'templates/t{i + 1}.png') for i in range(template_count)]
         print("範例圖片載入完成，請於遊戲抽卡畫面按下 F9 開始運行腳本")
+
+        # 載入所有角色的範本
+        character_templates = load_character_templates()
+        print(f"已載入 {len(character_templates)} 個角色的範本")
 
         while True:
             while not start_script:
