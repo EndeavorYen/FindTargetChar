@@ -1,14 +1,9 @@
 import cv2
 import numpy as np
-import pyautogui
 import time
-from pynput import keyboard
-from PIL import Image
 import sys
 import os
 from datetime import datetime
-from pyautogui import screenshot as take_screenshot
-import ctypes
 from sklearn.cluster import DBSCAN
 import argparse
 import glob
@@ -30,8 +25,8 @@ width = 3840
 def get_screen_width():
     """獲取螢幕寬度解析度"""
     try:
-        # 移除 Windows 專用的程式碼
-        # 改用 pyautogui 來獲取螢幕解析度
+        # Lazy import
+        import pyautogui
         screen_width = pyautogui.size()[0]  # 螢幕寬度
         print(f"螢幕解析度寬度：{screen_width}")
         return screen_width
@@ -333,27 +328,25 @@ def check_templates(screenshot, templates):
     return False
 
 def capture_screenshot(save_to_file=False):
-    """擷取螢幕畫面，可選擇是否儲存檔案
-    Args:
-        save_to_file (bool): 是否儲存為檔案
-    Returns:
-        np.array: 螢幕截圖的numpy陣列
-    """
-    screenshot = pyautogui.screenshot()
-    screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-    
-    if save_to_file:
-        # 確保 screenshots 資料夾存在
-        screenshots_dir = os.path.join(os.getcwd(), "screenshots")
-        os.makedirs(screenshots_dir, exist_ok=True)
-
-        # 使用時間戳命名並儲存截圖
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(screenshots_dir, f"screenshot_{timestamp}.png")
-        cv2.imwrite(filename, screenshot)
-        print(f"已截圖，已存放在目錄: {filename}")
-    
-    return screenshot
+    """擷取螢幕畫面，可選擇是否儲存檔案"""
+    try:
+        # Lazy import
+        import pyautogui
+        screenshot = pyautogui.screenshot()
+        screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+        
+        if save_to_file:
+            screenshots_dir = os.path.join(os.getcwd(), "screenshots")
+            os.makedirs(screenshots_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(screenshots_dir, f"screenshot_{timestamp}.png")
+            cv2.imwrite(filename, screenshot)
+            print(f"已截圖，已存放在目錄: {filename}")
+        
+        return screenshot
+    except Exception as e:
+        print(f"截圖時發生錯誤：{e}")
+        return None
 
 # 為了向後相容，可以保留save_screenshot函數
 def save_screenshot():
@@ -394,24 +387,28 @@ def process_buttons_and_templates(retry_template, retry_confirm_template, skip_t
     return False
 
 def toggle_start_stop():
-    global stop_script, start_script
-    
-    def on_press(key):
-        global stop_script, start_script
-        if key == keyboard.Key.f9:
-            if start_script:
-                print("按下F9鍵。停止腳本...")
-                stop_script = True
-                start_script = False
-            else:
-                print("按下F9鍵。啟動腳本...")
-                stop_script = False
-                start_script = True
-            time.sleep(0.5)
+    """監聽鍵盤事件"""
+    try:
+        # Lazy import
+        from pynput import keyboard
+        
+        def on_press(key):
+            global stop_script, start_script
+            if key == keyboard.Key.f9:
+                if start_script:
+                    print("按下F9鍵。停止腳本...")
+                    stop_script = True
+                    start_script = False
+                else:
+                    print("按下F9鍵。啟動腳本...")
+                    stop_script = False
+                    start_script = True
+                time.sleep(0.5)
 
-    # 啟動鍵盤監聽
-    listener = keyboard.Listener(on_press=on_press)
-    listener.start()
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
+    except Exception as e:
+        print(f"設置鍵盤監聽時發生錯誤：{e}")
 
 def get_template_count():
     templates_dir = os.path.join(os.getcwd(), "templates")
@@ -431,8 +428,8 @@ def rewrite_log(iteration, found):
         print(f"寫入記錄檔時發生錯誤: {e}")
         print("繼續執行腳本...")
 
-def test_template_matching():
-    """測試 template_matching 函式的正確性"""
+def run_tests():
+    """在沒有顯示器的環境下執行測試"""
     print("\n開始測試 template_matching 函式...")
     
     # 取得所有模板檔案
@@ -447,9 +444,11 @@ def test_template_matching():
         print("screenshots 資料夾中沒有 PNG 檔案供測試。")
         return
     
-    # 載入按鈕模板
-    folder = get_btn_folder()
-    star_template = load_image(f'{folder}/5star.png')
+    # 載入按鈕模板 (不使用 get_btn_folder，直接指定路徑)
+    star_template = cv2.imread('btns/1920/5star.png', cv2.IMREAD_COLOR)
+    if star_template is None:
+        print("無法載入 5star.png 範本")
+        return
     
     print(f"\n找到 {len(template_files)} 個模板檔案")
     print(f"找到 {len(screenshot_files)} 個測試截圖\n")
@@ -471,7 +470,7 @@ def test_template_matching():
         # 測試角色辨識
         print("\n角色辨識測試:")
         for template_file in template_files:
-            template = load_image(template_file)
+            template = cv2.imread(template_file, cv2.IMREAD_COLOR)
             if template is None:
                 continue
                 
@@ -481,49 +480,23 @@ def test_template_matching():
                 print(f"匹配座標: {matches}")
         print("-" * 50)
 
-def test_character_matching():
-    """測試 character_matching 函式的正確性"""
-    print("開始測試 character_matching 函式...")
-    character_template_path = resource_path('templates/character_template.png')  # 替換為實際的角色模板路徑
-    character_template = load_image(character_template_path)
-    if character_template is None:
-        print(f"無法載入角色模板圖片：{character_template_path}")
-        return
-    
-    screenshot_files = glob.glob(os.path.join('screenshots', '*.png'))
-    if not screenshot_files:
-        print("screenshots 資料夾中沒有 PNG 檔案供測試。")
-        return
-    
-    for screenshot_file in screenshot_files:
-        print(f"\n處理截圖：{screenshot_file}")
-        screenshot = cv2.imread(screenshot_file, cv2.IMREAD_COLOR)
-        if screenshot is None:
-            print(f"無法載入截圖：{screenshot_file}")
-            continue
-        matches = character_matching(screenshot, character_template)
-        print(f"找到 {len(matches)} 個角色匹配點：{matches}")
-
-def run_tests():
-    """執行所有測試"""
-    test_template_matching()
-    test_character_matching()
-
 def main():
-    global stop_script, start_script
-    global star_match_count, target_match_count
-    global save_star_screenshot, save_target_screenshot
-
     parser = argparse.ArgumentParser(description="Template Matching Script")
     parser.add_argument('--test', action='store_true', help='啟動測試模式')
     args = parser.parse_args()
 
     if args.test:
-        test_template_matching()  # 只需要這一個測試函數就足夠了
+        run_tests()
         return
 
     try:
+        # 只在需要時才導入相關模組
         toggle_start_stop()
+        
+        # 原本的 main 邏輯
+        global stop_script, start_script
+        global star_match_count, target_match_count
+        global save_star_screenshot, save_target_screenshot
 
         # 從config讀取target_count
         config = load_config()
