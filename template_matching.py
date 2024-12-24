@@ -307,8 +307,8 @@ class EvaluationMetrics:
         
         if self.verbose:
             print(f"\n驗證結果:")
-            print(f"5星數量 - 標準答案: {expected['star_count']}, 正確: {star_correct}")
-            print(f"角色匹配 - 標準答案: {expected['matches']}, 正確: {match_correct}")
+            print(f"5星數量 - 標準答案: {expected['star_count']}, 偵測到: {detected_star_count}, 正確: {star_correct}")
+            print(f"角色匹配 - 標準答案: {expected['matches']}, 偵測到: {detected_matches}, 正確: {match_correct}")
         
         return star_correct, match_correct
 
