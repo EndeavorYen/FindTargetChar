@@ -4,3 +4,4 @@ pyautogui
 pillow
 pynput
 scikit-learn
+tqdm

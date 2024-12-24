@@ -1,3 +1,4 @@
 screenshots/*
 log.txt
 templates/*
+*.pyc
