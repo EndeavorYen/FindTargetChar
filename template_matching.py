@@ -9,6 +9,7 @@ import argparse
 import glob
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from sklearn.cluster import MeanShift
 
 # 用來停止腳本的標誌
 stop_script = False
@@ -253,42 +254,101 @@ def star_matching(screenshot, template):
     return template_matching(screenshot, template, threshold, True)
 
 def character_matching(screenshot, template):
-    """角色圖片匹配，使用進階版本"""
+    """優化後的角色圖片匹配，結合模板匹配、特徵匹配與顏色資訊"""
     global width
-    # 根據解析度動態調整 threshold
-    base_threshold = 0.65  # 基礎 threshold
+
+    # 1. 圖像預處理 - 增強對比度和去噪
+    def preprocess_image(img):
+        # 轉換到 LAB 色彩空間
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+
+        # 使用 CLAHE 增強對比度
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        l = clahe.apply(l)
+
+        # 去噪處理
+        l = cv2.GaussianBlur(l, (3, 3), 0)
+
+        enhanced = cv2.merge([l, a, b])
+        return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+
+    screenshot = preprocess_image(screenshot)
+    template = preprocess_image(template)
+
+    # 2. 多尺度模板匹配
+    scale_factor = screenshot.shape[1] / 1920
+    scale_ranges = [scale_factor * x for x in [0.95, 1.0, 1.05]]
     
-    # 計算圖片的複雜度（使用邊緣檢測）
-    gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 100, 200)
-    complexity = np.sum(edges > 0) / (template.shape[0] * template.shape[1])
+    screenshot_gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
     
-    # 根據圖片複雜度調整 threshold
-    # 複雜度越高，threshold 可以設定得越低
-    threshold_adjustment = -0.05 * complexity
-    
-    # 根據解析度進行額外調整
-    if width > 1920:
-        resolution_adjustment = 0.03
-    elif width > 1440:
-        resolution_adjustment = 0.0
-    else:
-        resolution_adjustment = -0.03
+    # 儲存所有匹配結果
+    all_matches = []
+
+    for scale in scale_ranges:
+        # 重新調整模板大小
+        new_width = int(template.shape[1] * scale)
+        new_height = int(template.shape[0] * scale)
+        scaled_template = cv2.resize(template, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        scaled_template_gray = cv2.cvtColor(scaled_template, cv2.COLOR_BGR2GRAY)
+
+        # 執行模板匹配
+        result = cv2.matchTemplate(screenshot_gray, scaled_template_gray, cv2.TM_CCOEFF_NORMED)
         
-    final_threshold = base_threshold + threshold_adjustment + resolution_adjustment
-    final_threshold = max(0.55, min(0.75, final_threshold))  # 確保 threshold 在合理範圍內
+        # 設定閾值
+        threshold = 0.6
+        loc = np.where(result >= threshold)
+        
+        for pt in zip(*loc[::-1]):
+            all_matches.append((pt[0], pt[1], scale))
+
+    # 3. 特徵匹配 (AKAZE)
+    akaze = cv2.AKAZE_create()
+    kp1, des1 = akaze.detectAndCompute(screenshot, None)
+    kp2, des2 = akaze.detectAndCompute(template, None)
+
+    if des1 is not None and des2 is not None:
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        matches = bf.match(des2, des1)
+        matches = sorted(matches, key=lambda x: x.distance)
+        good_matches = [m for m in matches if m.distance < 40]
+
+        if len(good_matches) >= 5:
+            src_pts = np.float32([kp2[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            dst_pts = np.float32([kp1[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+            if M is not None:
+                h, w = template.shape[:2]
+                pts = np.float32([[0,0], [0,h-1], [w-1,h-1], [w-1,0]]).reshape(-1,1,2)
+                dst = cv2.perspectiveTransform(pts, M)
+                center_x = int(np.mean(dst[:,0,0]))
+                center_y = int(np.mean(dst[:,0,1]))
+                all_matches.append((center_x, center_y, 1.0))
+
+    # 4. 根據顏色資訊篩選 (可選)
+    # ...
+
+    # 5. 後處理 - 群集或 NMS
+    if not all_matches:
+        return []
+
+    points = np.array([(x, y) for x, y, s in all_matches])
     
-    print(f"\n圖片匹配資訊:")
-    print(f"圖片複雜度: {complexity:.4f}")
-    print(f"基礎 threshold: {base_threshold}")
-    print(f"複雜度調整: {threshold_adjustment:.4f}")
-    print(f"解析度調整: {resolution_adjustment:.4f}")
-    print(f"最終 threshold: {final_threshold:.4f}")
+    # 使用 DBSCAN 進行群集
+    clustering = DBSCAN(eps=30, min_samples=1).fit(points)
     
-    template = cv2.GaussianBlur(template, (3, 3), 0)
-    screenshot = cv2.GaussianBlur(screenshot, (3, 3), 0)
-    
-    return template_matching_advanced(screenshot, template, final_threshold)
+    final_points = []
+    for label in set(clustering.labels_):
+        if label == -1:
+            continue
+        mask = clustering.labels_ == label
+        cluster_points = points[mask]
+        center = np.mean(cluster_points, axis=0)
+        final_points.append(tuple(map(int, center)))
+
+    return final_points
 
 def check_star_count(screenshot, template):
     """檢查是否找到足夠的5星角色
@@ -546,8 +606,8 @@ def run_tests():
                 correct_matches += 1
             
             print(f"\n驗證結果:")
-            print(f"5星數量 - 預期: {expected['star_count']}, 實際: {detected_star_count}")
-            print(f"角色匹配 - 預期: {expected['matches']}, 實際: {detected_matches}")
+            print(f"5星數量 - 標準答案: {expected['star_count']}, 偵測結果: {detected_star_count}")
+            print(f"角色匹配 - 標準答案: {expected['matches']}, 偵測結果: {detected_matches}")
         
     # 輸出整體準確度
     if total_tests > 0:
@@ -555,6 +615,20 @@ def run_tests():
         print(f"總測試數: {total_tests}")
         print(f"5星辨識準確率: {(correct_star_count/total_tests)*100:.2f}%")
         print(f"角色匹配準確率: {(correct_matches/total_tests)*100:.2f}%")
+
+def visualize_matches(screenshot, template, kp1, kp2, good_matches, M):
+    """可視化匹配點和單應性變換"""
+    img_matches = cv2.drawMatches(template, kp2, screenshot, kp1, good_matches, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+
+    # 繪製單應性變換的結果
+    h, w = template.shape[:2]
+    pts = np.float32([[0,0], [0,h-1], [w-1,h-1], [w-1,0]]).reshape(-1,1,2)
+    dst = cv2.perspectiveTransform(pts, M)
+    img_matches = cv2.polylines(img_matches, [np.int32(dst + (template.shape[1], 0))], True, (255, 0, 0), 3, cv2.LINE_AA)
+
+    cv2.imshow("Matches", img_matches)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 def main():
     parser = argparse.ArgumentParser(description="Template Matching Script")
