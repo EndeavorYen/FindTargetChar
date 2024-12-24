@@ -403,18 +403,23 @@ def run_tests():
         screenshot_files, answers, template_files
     )
     
+    # 計算準確率
+    star_accuracy = correct_stars / total_tests if total_tests > 0 else 0
+    match_accuracy = correct_matches / total_tests if total_tests > 0 else 0
+    
     # 輸出結果
     if total_tests > 0:
         print(f"\n測試總結:")
         print(f"總測試數: {total_tests}")
-        print(f"5星辨識準確率: {(correct_stars/total_tests)*100:.2f}%")
-        print(f"角色匹配準確率: {(correct_matches/total_tests)*100:.2f}%")
+        print(f"5星辨識準確率: {star_accuracy*100:.2f}%")
+        print(f"角色匹配準確率: {match_accuracy*100:.2f}%")
+        print(f"總分: {match_accuracy*100:.2f}%")
 
 def evaluate_params(args):
     """評估單一參數組合"""
     params, screenshot_files, answers, template_files, star_template = args
     try:
-        print(f"正在評估參數組合: {params}")  # 新增這行來顯示正在測試的參數
+        print(f"正在評估閾值: {params['template_threshold']}")
         evaluator = EvaluationMetrics(star_template, verbose=False)
         total_tests, correct_stars, correct_matches = evaluator.evaluate_accuracy(
             screenshot_files, answers, template_files, params)
@@ -422,11 +427,8 @@ def evaluate_params(args):
         star_accuracy = correct_stars / total_tests if total_tests > 0 else 0
         match_accuracy = correct_matches / total_tests if total_tests > 0 else 0
         
-        # 只有當5星辨識準確率達到100%時，才考慮該參數組合
-        if star_accuracy == 1.0:
-            accuracy = match_accuracy
-        else:
-            accuracy = 0
+        # 移除 5 星準確率的條件，直接使用角色匹配準確率
+        accuracy = match_accuracy
             
         return params, accuracy, star_accuracy, match_accuracy
     except Exception as e:
@@ -434,7 +436,7 @@ def evaluate_params(args):
         return params, 0, 0, 0
 
 def optimize_parameters(test_cases):
-    """使用網格搜索和多執行緒優化參數"""
+    """使用網格搜索優化閾值參數"""
     # 載入設定
     config = load_config()
     thread_count = min(config['thread_count'], os.cpu_count() or 4)
@@ -451,19 +453,14 @@ def optimize_parameters(test_cases):
     
     star_template = cv2.imread('btns/1920/5star.png')
     
-    # 創建評估器實例
+    # 建立評估器實例
     evaluator = EvaluationMetrics(star_template, verbose=False)
 
-    # 第一階段：粗略搜索
-    param_ranges_coarse = {
-        'template_threshold': [0.4, 0.5, 0.6, 0.7, 0.8],
-        'feature_threshold': [30, 40, 50, 60],
-        'cluster_threshold': [20, 30, 40, 50]
-    }
+    # 以 0.75 為中心的閾值範圍
+    thresholds = [0.70, 0.725, 0.75, 0.775, 0.80]
     
-    print("第一階段：粗略搜索")
-    param_combinations = [dict(zip(param_ranges_coarse.keys(), v)) 
-                        for v in itertools.product(*param_ranges_coarse.values())]
+    print("開始閾值優化搜索")
+    param_combinations = [{'template_threshold': t} for t in thresholds]
     
     # 準備參數組合
     eval_args = [(params, screenshot_files, answers, template_files, star_template) 
@@ -477,13 +474,13 @@ def optimize_parameters(test_cases):
         futures = [executor.submit(evaluate_params, args) for args in eval_args]
         total = len(futures)
         
-        print(f"\n開始評估參數組合（粗略），共 {total} 組")
+        print(f"\n開始評估閾值，共 {total} 組")
         for i, future in enumerate(as_completed(futures), 1):
             try:
                 params, accuracy, star_accuracy, match_accuracy = future.result(timeout=60)
-                if accuracy > 0:  # 只記錄有效的結果
-                    results.append((params, accuracy))
+                results.append((params, accuracy))
                 print(f"進度: {i}/{total} ({i/total*100:.1f}%), "
+                      f"閾值: {params['template_threshold']}, "
                       f"5星準確率: {star_accuracy:.3f}, "
                       f"角色準確率: {match_accuracy:.3f}, "
                       f"總分: {accuracy:.3f}")
@@ -492,82 +489,14 @@ def optimize_parameters(test_cases):
                 continue
     
     if not results:
-        print("未找到有效的參數組合，使用預設參數")
-        return {
-            'template_threshold': 0.6,
-            'feature_threshold': 40,
-            'cluster_threshold': 30
-        }
+        print("未找到有效的參數組合，使用預設閾值 0.75")
+        return {'template_threshold': 0.75}
     
-    # 選擇前3個最佳結果進行細化
-    top_results = sorted(results, key=lambda x: x[1], reverse=True)[:3]
+    # 選擇最佳結果
+    best_params, best_accuracy = max(results, key=lambda x: x[1])
     
-    # 第二階段：細化搜索
-    print("\n第二階段：細化搜索")
-    refined_results = []
-    
-    for base_params, base_accuracy in top_results:
-        refined_ranges = {
-            'template_threshold': np.linspace(
-                max(0.3, base_params['template_threshold'] - 0.05),
-                min(0.9, base_params['template_threshold'] + 0.05),
-                5
-            ),
-            'feature_threshold': range(
-                max(20, base_params['feature_threshold'] - 5),
-                min(70, base_params['feature_threshold'] + 6),
-                2
-            ),
-            'cluster_threshold': range(
-                max(15, base_params['cluster_threshold'] - 5),
-                min(60, base_params['cluster_threshold'] + 6),
-                2
-            )
-        }
-        
-        refined_combinations = [dict(zip(refined_ranges.keys(), v)) 
-                              for v in itertools.product(*map(list, refined_ranges.values()))]
-        
-        # 準備細化參數組合
-        refined_eval_args = [(params, screenshot_files, answers, template_files, star_template) 
-                            for params in refined_combinations]
-        
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(evaluate_params, args) for args in refined_eval_args]
-            total_refined = len(futures)
-            
-            print(f"\n開始細化評估，基準精確度: {base_accuracy:.3f}，共 {total_refined} 組")
-            for i, future in enumerate(as_completed(futures), 1):
-                try:
-                    params, accuracy, star_accuracy, match_accuracy = future.result(timeout=60)
-                    if accuracy > 0:
-                        refined_results.append((params, accuracy))
-                    print(f"進度: {i}/{total_refined} ({i/total_refined*100:.1f}%), "
-                          f"5星準確率: {star_accuracy:.3f}, "
-                          f"角色準確率: {match_accuracy:.3f}, "
-                          f"總分: {accuracy:.3f}")
-                except Exception as e:
-                    print(f"處理結果時發生錯誤: {str(e)}")
-                    continue
-
-    # 找出最佳參數
-    best_params, best_accuracy = max(refined_results, key=lambda x: x[1])
-    
-    # 使用最佳參數重新評估以顯示詳細結果
-    evaluator.verbose = True
-    total_tests, correct_stars, correct_matches = evaluator.evaluate_accuracy(
-        screenshot_files,
-        answers,
-        template_files,
-        params=best_params
-    )
-    
-    print(f"\n最佳參數組合:")
-    for param, value in best_params.items():
-        print(f"{param}: {value}")
-    print(f"5星辨識準確率: {(correct_stars/total_tests)*100:.2f}%")
-    print(f"角色匹配準確率: {(correct_matches/total_tests)*100:.2f}%")
-    print(f"總體準確率: {best_accuracy*100:.2f}%")
+    print(f"\n最佳閾值: {best_params['template_threshold']}")
+    print(f"準確率: {best_accuracy*100:.2f}%")
     
     save_optimization_params(best_params)
     return best_params
@@ -823,53 +752,53 @@ def toggle_start_stop():
     except Exception as e:
         print(f"設置鍵盤監聽時發生錯誤：{e}")
 
-def get_template_count():
-    """獲取角色資料夾的數量"""
-    templates_dir = os.path.join(os.getcwd(), "templates")
-    if not os.path.exists(templates_dir):
-        print("templates 資料夾不存在！請確認路徑。")
-        return 0
+# def get_template_count():
+#     """獲取角色資料夾的數量"""
+#     templates_dir = os.path.join(os.getcwd(), "templates")
+#     if not os.path.exists(templates_dir):
+#         print("templates 資料夾不存在！請確認路徑。")
+#         return 0
 
-    # 計算 t* 資料夾的數量
-    folders = [f for f in os.listdir(templates_dir) 
-              if os.path.isdir(os.path.join(templates_dir, f)) and f.startswith('t')]
-    return len(folders)
+#     # 計算 t* 資料夾的數量
+#     folders = [f for f in os.listdir(templates_dir) 
+#               if os.path.isdir(os.path.join(templates_dir, f)) and f.startswith('t')]
+#     return len(folders)
 
-def load_character_templates():
-    """載入所有角色的範本圖片
-    Returns:
-        dict: 角色編號為key，包含該角色所有範本圖片的列表為value
-    """
-    templates_dir = os.path.join(os.getcwd(), "templates")
-    character_templates = {}
+# def load_character_templates():
+#     """載入所有角色的範本圖片
+#     Returns:
+#         dict: 角色編號為key，包含該角色所有範本圖片的列表為value
+#     """
+#     templates_dir = os.path.join(os.getcwd(), "templates")
+#     character_templates = {}
     
-    if not os.path.exists(templates_dir):
-        print("templates 資料夾不存在！")
-        return character_templates
+#     if not os.path.exists(templates_dir):
+#         print("templates 資料夾不存在！")
+#         return character_templates
     
-    # 遍歷每個 t* 資料夾
-    for character_folder in sorted(os.listdir(templates_dir)):
-        if not character_folder.startswith('t'):
-            continue
+#     # 遍歷每個 t* 資料夾
+#     for character_folder in sorted(os.listdir(templates_dir)):
+#         if not character_folder.startswith('t'):
+#             continue
             
-        folder_path = os.path.join(templates_dir, character_folder)
-        if not os.path.isdir(folder_path):
-            continue
+#         folder_path = os.path.join(templates_dir, character_folder)
+#         if not os.path.isdir(folder_path):
+#             continue
             
-        # 載入該角色的所有範本圖片
-        templates = []
-        for img_file in sorted(os.listdir(folder_path)):
-            if img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                img_path = os.path.join(folder_path, img_file)
-                template = cv2.imread(img_path)
-                if template is not None:
-                    templates.append(template)
-                    print(f"已載入範本：{img_path}")
+#         # 載入該角色的所有範本圖片
+#         templates = []
+#         for img_file in sorted(os.listdir(folder_path)):
+#             if img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+#                 img_path = os.path.join(folder_path, img_file)
+#                 template = cv2.imread(img_path)
+#                 if template is not None:
+#                     templates.append(template)
+#                     print(f"已載入範本：{img_path}")
         
-        if templates:
-            character_templates[character_folder] = templates
+#         if templates:
+#             character_templates[character_folder] = templates
     
-    return character_templates
+#     return character_templates
 
 def check_templates(screenshot, character_templates):
     """檢查是否找到足夠的角色圖片
@@ -967,15 +896,13 @@ def main():
     optimal_params = load_optimization_params()
     
     try:
-        # 只在需要時才導入相關模組
         toggle_start_stop()
         
-        # 原本的 main 邏輯
         global stop_script, start_script
         global star_match_count, target_match_count
         global save_star_screenshot, save_target_screenshot
 
-        # 從config讀取target_count
+        # 從config讀取設定
         config = load_config()
         star_match_count = config.get('star_count', 3)
         target_match_count = config.get('target_count', 1)
@@ -992,27 +919,21 @@ def main():
 - 延遲時間: {delay_time}
 """)
 
-        template_count = get_template_count()
-        if template_count == 0:
-            print("未找到任何範例圖片，強制將匹配數量設置為0")
-            target_match_count = 0
-        else:
-            print(f"範例圖片數量自動設定為: {template_count}")
-
+        # 載入按鈕範本
         folder = get_btn_folder()
-
         retry_template = load_image(f'{folder}/retry.png')
         retry_confirm_template = load_image(f'{folder}/retry_confirm.png')
         skip_template = load_image(f'{folder}/skip.png')
-
         star_template = load_image(f'{folder}/5star.png')
 
-        templates = [load_image(f'templates/t{i + 1}.png') for i in range(template_count)]
-        print("範例圖片載入完成，請於遊戲抽卡畫面按下 F9 開始運行腳本")
-
-        # 載入所有角色的範本
+        # 載入角色範本
         character_templates = load_character_templates()
+        if not character_templates:
+            print("未找到任何角色範本，請確認 templates 資料夾結構是否正確")
+            return
+
         print(f"已載入 {len(character_templates)} 個角色的範本")
+        print("範例圖片載入完成，請於遊戲抽卡畫面按下 F9 開始運行腳本")
 
         while True:
             while not start_script:
@@ -1024,7 +945,13 @@ def main():
             while start_script:
                 iteration += 1
                 print(f"運行次數 {iteration}")
-                found = process_buttons_and_templates(retry_template, retry_confirm_template, skip_template, star_template, templates)
+                found = process_buttons_and_templates(
+                    retry_template, 
+                    retry_confirm_template, 
+                    skip_template, 
+                    star_template, 
+                    character_templates
+                )
                 rewrite_log(iteration, found)
                 if found or stop_script:
                     start_script = False
