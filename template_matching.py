@@ -108,6 +108,7 @@ def process_scale(screenshot, template, scale, methods, threshold):
                         center_pt = (pt[0] + w//2, pt[1] + h//2)
                         scale_points.append(center_pt)
                         scale_scores.append(score)
+                        print(f"找到匹配點 - 座標: {center_pt}, 相似度: {score:.4f}, 縮放比例: {scale:.2f}")
                         
         except Exception as e:
             print(f"預處理方法發生錯誤: {e}")
@@ -254,17 +255,40 @@ def star_matching(screenshot, template):
 def character_matching(screenshot, template):
     """角色圖片匹配，使用進階版本"""
     global width
+    # 根據解析度動態調整 threshold
+    base_threshold = 0.65  # 基礎 threshold
+    
+    # 計算圖片的複雜度（使用邊緣檢測）
+    gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 100, 200)
+    complexity = np.sum(edges > 0) / (template.shape[0] * template.shape[1])
+    
+    # 根據圖片複雜度調整 threshold
+    # 複雜度越高，threshold 可以設定得越低
+    threshold_adjustment = -0.05 * complexity
+    
+    # 根據解析度進行額外調整
     if width > 1920:
-        threshold = 0.68
+        resolution_adjustment = 0.03
     elif width > 1440:
-        threshold = 0.65
+        resolution_adjustment = 0.0
     else:
-        threshold = 0.62
+        resolution_adjustment = -0.03
+        
+    final_threshold = base_threshold + threshold_adjustment + resolution_adjustment
+    final_threshold = max(0.55, min(0.75, final_threshold))  # 確保 threshold 在合理範圍內
+    
+    print(f"\n圖片匹配資訊:")
+    print(f"圖片複雜度: {complexity:.4f}")
+    print(f"基礎 threshold: {base_threshold}")
+    print(f"複雜度調整: {threshold_adjustment:.4f}")
+    print(f"解析度調整: {resolution_adjustment:.4f}")
+    print(f"最終 threshold: {final_threshold:.4f}")
     
     template = cv2.GaussianBlur(template, (3, 3), 0)
     screenshot = cv2.GaussianBlur(screenshot, (3, 3), 0)
     
-    return template_matching_advanced(screenshot, template, threshold)
+    return template_matching_advanced(screenshot, template, final_threshold)
 
 def check_star_count(screenshot, template):
     """檢查是否找到足夠的5星角色
