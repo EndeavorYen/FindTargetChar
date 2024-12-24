@@ -108,7 +108,7 @@ def process_scale(screenshot, template, scale, methods, threshold):
                         center_pt = (pt[0] + w//2, pt[1] + h//2)
                         scale_points.append(center_pt)
                         scale_scores.append(score)
-                        print(f"找到匹配點 - 座標: {center_pt}, 相似度: {score:.4f}, 縮放比例: {scale:.2f}")
+                        # print(f"找到匹配點 - 座標: {center_pt}, 相似度: {score:.4f}, 縮放比例: {scale:.2f}")
                         
         except Exception as e:
             print(f"預處理方法發生錯誤: {e}")
