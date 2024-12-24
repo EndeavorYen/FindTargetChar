@@ -13,6 +13,8 @@ from sklearn.cluster import MeanShift
 import json
 import itertools
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import as_completed
 
 # 用來停止腳本的標誌
 stop_script = False
@@ -66,7 +68,8 @@ def load_config():
             "target_count": config.getint('Settings', 'target_count', fallback=1),
             "save_star_screenshot": config.getboolean('Settings', 'save_star_screenshot', fallback=True),
             "save_target_screenshot": config.getboolean('Settings', 'save_target_screenshot', fallback=True),
-            "delay_time": config.getfloat('Settings', 'delay_time', fallback=1.0)
+            "delay_time": config.getfloat('Settings', 'delay_time', fallback=1.0),
+            "thread_count": config.getint('Settings', 'thread_count', fallback=4)
         }
     except Exception as e:
         print(f"讀取設定檔時發生錯誤：{e}，將使用預設值")
@@ -75,7 +78,8 @@ def load_config():
             "target_count": 1,
             "save_star_screenshot": True,
             "save_target_screenshot": True,
-            "delay_time": 1.0
+            "delay_time": 1.0,
+            "thread_count": 4
         }
 
 def load_image(image_path):
@@ -387,8 +391,34 @@ def run_tests():
         print(f"5星辨識準確率: {(correct_stars/total_tests)*100:.2f}%")
         print(f"角色匹配準確率: {(correct_matches/total_tests)*100:.2f}%")
 
+def evaluate_params(args):
+    """評估單一參數組合"""
+    params, screenshot_files, answers, template_files, star_template = args
+    try:
+        evaluator = EvaluationMetrics(star_template, verbose=False)
+        total_tests, correct_stars, correct_matches = evaluator.evaluate_accuracy(
+            screenshot_files, answers, template_files, params)
+        
+        star_accuracy = correct_stars / total_tests if total_tests > 0 else 0
+        match_accuracy = correct_matches / total_tests if total_tests > 0 else 0
+        
+        # 只有當5星辨識準確率達到100%時，才考慮該參數組合
+        if star_accuracy == 1.0:
+            accuracy = match_accuracy
+        else:
+            accuracy = 0
+            
+        return params, accuracy, star_accuracy, match_accuracy
+    except Exception as e:
+        print(f"評估參數時發生錯誤: {str(e)}")
+        return params, 0, 0, 0
+
 def optimize_parameters(test_cases):
     """使用網格搜索和多執行緒優化參數"""
+    # 載入設定
+    config = load_config()
+    thread_count = min(config['thread_count'], os.cpu_count() or 4)
+    
     # 從測試案例中提取所需資訊
     screenshot_files = [case[0] for case in test_cases]
     template_files = list(set([template for case in test_cases for template in case[1]]))
@@ -400,41 +430,108 @@ def optimize_parameters(test_cases):
         answers[filename] = expected
     
     star_template = cv2.imread('btns/1920/5star.png')
-    evaluator = EvaluationMetrics(star_template, verbose=False)
     
-    param_ranges = {
-        'template_threshold': [0.5, 0.55, 0.6, 0.65, 0.7],
-        'feature_threshold': [35, 40, 45, 50],
-        'cluster_threshold': [25, 30, 35, 40]
+    # 第一階段：粗略搜索
+    param_ranges_coarse = {
+        'template_threshold': [0.4, 0.5, 0.6, 0.7, 0.8],
+        'feature_threshold': [30, 40, 50, 60],
+        'cluster_threshold': [20, 30, 40, 50]
     }
     
-    param_combinations = [dict(zip(param_ranges.keys(), v)) 
-                        for v in itertools.product(*param_ranges.values())]
+    print("第一階段：粗略搜索")
+    param_combinations = [dict(zip(param_ranges_coarse.keys(), v)) 
+                        for v in itertools.product(*param_ranges_coarse.values())]
     
-    print(f"開始優化，共 {len(param_combinations)} 種參數組合")
+    # 準備參數組合
+    eval_args = [(params, screenshot_files, answers, template_files, star_template) 
+                 for params in param_combinations]
     
-    with ThreadPoolExecutor(max_workers=min(os.cpu_count(), 8)) as executor:
-        futures = []
-        for params in param_combinations:
-            future = executor.submit(
-                evaluator.evaluate_accuracy,
-                screenshot_files,
-                answers,
-                template_files,
-                params
-            )
-            futures.append((params, future))
+    # 使用設定的執行緒數量
+    max_workers = thread_count
+    
+    results = []
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(evaluate_params, args) for args in eval_args]
+        total = len(futures)
         
-        results = []
-        for params, future in tqdm(futures, desc="評估參數組合"):
-            total_tests, correct_stars, correct_matches = future.result()
-            # 計算綜合準確率
-            accuracy = (correct_stars + correct_matches) / (total_tests * 2) if total_tests > 0 else 0
-            results.append((params, accuracy))
+        print(f"\n開始評估參數組合（粗略），共 {total} 組")
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                params, accuracy, star_accuracy, match_accuracy = future.result(timeout=60)
+                if accuracy > 0:  # 只記錄有效的結果
+                    results.append((params, accuracy))
+                print(f"進度: {i}/{total} ({i/total*100:.1f}%), "
+                      f"5星準確率: {star_accuracy:.3f}, "
+                      f"角色準確率: {match_accuracy:.3f}, "
+                      f"總分: {accuracy:.3f}")
+            except Exception as e:
+                print(f"處理結果時發生錯誤: {str(e)}")
+                continue
     
-    best_params, best_accuracy = max(results, key=lambda x: x[1])
+    if not results:
+        print("未找到有效的參數組合，使用預設參數")
+        return {
+            'template_threshold': 0.6,
+            'feature_threshold': 40,
+            'cluster_threshold': 30
+        }
+    
+    # 選擇前3個最佳結果進行細化
+    top_results = sorted(results, key=lambda x: x[1], reverse=True)[:3]
+    
+    # 第二階段：細化搜索
+    print("\n第二階段：細化搜索")
+    refined_results = []
+    
+    for base_params, base_accuracy in top_results:
+        refined_ranges = {
+            'template_threshold': np.linspace(
+                max(0.3, base_params['template_threshold'] - 0.05),
+                min(0.9, base_params['template_threshold'] + 0.05),
+                5
+            ),
+            'feature_threshold': range(
+                max(20, base_params['feature_threshold'] - 5),
+                min(70, base_params['feature_threshold'] + 6),
+                2
+            ),
+            'cluster_threshold': range(
+                max(15, base_params['cluster_threshold'] - 5),
+                min(60, base_params['cluster_threshold'] + 6),
+                2
+            )
+        }
+        
+        refined_combinations = [dict(zip(refined_ranges.keys(), v)) 
+                              for v in itertools.product(*map(list, refined_ranges.values()))]
+        
+        # 準備細化參數組合
+        refined_eval_args = [(params, screenshot_files, answers, template_files, star_template) 
+                            for params in refined_combinations]
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(evaluate_params, args) for args in refined_eval_args]
+            total_refined = len(futures)
+            
+            print(f"\n開始細化評估，基準精確度: {base_accuracy:.3f}，共 {total_refined} 組")
+            for i, future in enumerate(as_completed(futures), 1):
+                try:
+                    params, accuracy, star_accuracy, match_accuracy = future.result(timeout=60)
+                    if accuracy > 0:
+                        refined_results.append((params, accuracy))
+                    print(f"進度: {i}/{total_refined} ({i/total_refined*100:.1f}%), "
+                          f"5星準確率: {star_accuracy:.3f}, "
+                          f"角色準確率: {match_accuracy:.3f}, "
+                          f"總分: {accuracy:.3f}")
+                except Exception as e:
+                    print(f"處理結果時發生錯誤: {str(e)}")
+                    continue
+
+    # 找出最佳參數
+    best_params, best_accuracy = max(refined_results, key=lambda x: x[1])
     
     # 使用最佳參數重新評估以顯示詳細結果
+    evaluator.verbose = True
     total_tests, correct_stars, correct_matches = evaluator.evaluate_accuracy(
         screenshot_files,
         answers,
