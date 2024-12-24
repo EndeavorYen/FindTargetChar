@@ -10,6 +10,9 @@ import glob
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from sklearn.cluster import MeanShift
+import json
+import itertools
+from tqdm import tqdm
 
 # 用來停止腳本的標誌
 stop_script = False
@@ -253,102 +256,244 @@ def star_matching(screenshot, template):
     threshold = 0.8 if width > 1920 else 0.78
     return template_matching(screenshot, template, threshold, True)
 
-def character_matching(screenshot, template):
-    """優化後的角色圖片匹配，結合模板匹配、特徵匹配與顏色資訊"""
-    global width
+def load_optimization_params():
+    """載入優化後的參數"""
+    try:
+        with open('optimal_params.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {
+            'template_threshold': 0.6,  # 模板匹配閾值
+            'feature_threshold': 40,    # 特徵匹配閾值
+            'cluster_threshold': 30     # 群集閾值
+        }
 
-    # 1. 圖像預處理 - 增強對比度和去噪
-    def preprocess_image(img):
-        # 轉換到 LAB 色彩空間
-        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
+def save_optimization_params(params):
+    """儲存優化後的參數"""
+    with open('optimal_params.json', 'w') as f:
+        json.dump(params, f, indent=4)
 
-        # 使用 CLAHE 增強對比度
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        l = clahe.apply(l)
-
-        # 去噪處理
-        l = cv2.GaussianBlur(l, (3, 3), 0)
-
-        enhanced = cv2.merge([l, a, b])
-        return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-
-    screenshot = preprocess_image(screenshot)
-    template = preprocess_image(template)
-
-    # 2. 多尺度模板匹配
-    scale_factor = screenshot.shape[1] / 1920
-    scale_ranges = [scale_factor * x for x in [0.95, 1.0, 1.05]]
+def evaluate_single_case(screenshot, star_template, template_files, expected, params=None):
+    """評估單一測試案例
+    Args:
+        screenshot: 截圖影像
+        star_template: 5星模板影像
+        template_files: 角色模板檔案列表
+        expected: 預期結果 dict，包含 'star_count' 和 'matches'
+        params: 優化參數 (用於 character_matching)
+    Returns:
+        tuple: (star_correct, match_correct) 布林值表示是否正確
+    """
+    # 檢查5星數量
+    star_matches = star_matching(screenshot, star_template)
+    detected_star_count = len(star_matches)
+    star_correct = (detected_star_count == expected['star_count'])
     
-    screenshot_gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
-    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    # 檢查角色匹配
+    detected_matches = set()
+    for template_file in template_files:
+        template = cv2.imread(template_file)
+        if template is None:
+            continue
+        
+        template_name = os.path.basename(template_file).split('.')[0]
+        matches = character_matching(screenshot, template, params)
+        if matches:
+            detected_matches.add(template_name)
     
-    # 儲存所有匹配結果
-    all_matches = []
+    # 驗證角色匹配結果
+    expected_matches = expected['matches']
+    if expected_matches == set() or expected_matches == {'-'}:
+        match_correct = (not detected_matches)
+    else:
+        match_correct = (detected_matches == expected_matches)
+    
+    return star_correct, match_correct
 
-    for scale in scale_ranges:
-        # 重新調整模板大小
-        new_width = int(template.shape[1] * scale)
-        new_height = int(template.shape[0] * scale)
-        scaled_template = cv2.resize(template, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-        scaled_template_gray = cv2.cvtColor(scaled_template, cv2.COLOR_BGR2GRAY)
-
-        # 執行模板匹配
-        result = cv2.matchTemplate(screenshot_gray, scaled_template_gray, cv2.TM_CCOEFF_NORMED)
+def evaluate_accuracy(screenshot_files, answers, star_template, template_files, params=None, verbose=False):
+    """評估整體準確率
+    Args:
+        screenshot_files: 截圖檔案列表
+        answers: 標準答案字典
+        star_template: 5星模板影像
+        template_files: 角色模板檔案列表
+        params: 優化參數 (用於 character_matching)
+        verbose: 是否輸出詳細資訊
+    Returns:
+        tuple: (total_tests, correct_stars, correct_matches)
+    """
+    total_tests = 0
+    correct_stars = 0
+    correct_matches = 0
+    
+    for screenshot_file in screenshot_files:
+        filename = os.path.basename(screenshot_file)
+        if filename not in answers:
+            continue
+            
+        if verbose:
+            print(f"\n處理截圖：{filename}")
         
-        # 設定閾值
-        threshold = 0.6
-        loc = np.where(result >= threshold)
+        screenshot = cv2.imread(screenshot_file)
+        if screenshot is None:
+            continue
         
-        for pt in zip(*loc[::-1]):
-            all_matches.append((pt[0], pt[1], scale))
+        expected = answers[filename]
+        # 檢查 matches 是否已經是 set
+        if not isinstance(expected['matches'], set):
+            expected['matches'] = set() if expected['matches'] == '-' else set(expected['matches'].split(','))
+        
+        star_correct, match_correct = evaluate_single_case(
+            screenshot, star_template, template_files, expected, params)
+        
+        total_tests += 1
+        if star_correct:
+            correct_stars += 1
+        if match_correct:
+            correct_matches += 1
+            
+        if verbose:
+            print(f"\n驗證結果:")
+            print(f"5星數量 - 標準答案: {expected['star_count']}, 正確: {star_correct}")
+            print(f"角色匹配 - 標準答案: {expected['matches']}, 正確: {match_correct}")
+    
+    return total_tests, correct_stars, correct_matches
 
-    # 3. 特徵匹配 (AKAZE)
+def run_tests():
+    """執行測試模式"""
+    print("\n開始測試 template_matching 函式...")
+    
+    # 載入必要資料
+    answers = load_test_answers()
+    if not answers:
+        print("無法進行準確度驗證")
+        return
+        
+    template_files = glob.glob(os.path.join('templates', 't*.png'))
+    if not template_files:
+        print("templates 資料夾中沒有找到 t*.png 檔案。")
+        return
+        
+    screenshot_files = glob.glob(os.path.join('screenshots', '*.png'))
+    if not screenshot_files:
+        print("screenshots 資料夾中沒有 PNG 檔案供測試。")
+        return
+    
+    star_template = cv2.imread('btns/1920/5star.png', cv2.IMREAD_COLOR)
+    if star_template is None:
+        print("無法載入 5star.png 範本")
+        return
+    
+    print(f"\n找到 {len(template_files)} 個模板檔案")
+    print(f"找到 {len(screenshot_files)} 個測試截圖\n")
+    
+    # 執行評估
+    total_tests, correct_stars, correct_matches = evaluate_accuracy(
+        screenshot_files, answers, star_template, template_files, 
+        verbose=True
+    )
+    
+    # 輸出結果
+    if total_tests > 0:
+        print(f"\n測試總結:")
+        print(f"總測試數: {total_tests}")
+        print(f"5星辨識準確率: {(correct_stars/total_tests)*100:.2f}%")
+        print(f"角色匹配準確率: {(correct_matches/total_tests)*100:.2f}%")
+
+def evaluate_params(params, test_cases):
+    """評估參數組合的效能"""
+    screenshot_files = [case[0] for case in test_cases]
+    template_files = list(set([template for case in test_cases for template in case[1]]))
+    star_template = cv2.imread('btns/1920/5star.png', cv2.IMREAD_COLOR)
+    
+    # 將 test_cases 轉換為 answers 格式
+    answers = {}
+    for screenshot_path, template_paths, expected in test_cases:
+        filename = os.path.basename(screenshot_path)
+        answers[filename] = expected
+    
+    total_tests, correct_stars, correct_matches = evaluate_accuracy(
+        screenshot_files, answers, star_template, template_files, 
+        params=params, verbose=False
+    )
+    
+    if total_tests == 0:
+        return 0
+    
+    star_accuracy = correct_stars / total_tests
+    match_accuracy = correct_matches / total_tests
+    return (star_accuracy + match_accuracy) / 2
+
+def prepare_test_cases():
+    """準備測試案例"""
+    test_cases = []
+    answers = load_test_answers()
+    
+    for filename, data in answers.items():
+        screenshot_path = os.path.join('screenshots', filename)
+        if not os.path.exists(screenshot_path):
+            continue
+            
+        template_paths = []
+        matches = set() if data['matches'] == '-' else set(data['matches'].split(','))
+        
+        for template_name in matches:
+            template_path = os.path.join('templates', f'{template_name}.png')
+            if os.path.exists(template_path):
+                template_paths.append(template_path)
+        
+        test_cases.append((
+            screenshot_path,
+            template_paths,
+            {
+                'star_count': data['star_count'],
+                'matches': matches
+            }
+        ))
+    
+    return test_cases
+
+def character_matching(screenshot, template, params=None):
+    """優化後的角色圖片匹配"""
+    if params is None:
+        params = load_optimization_params()
+    
+    # 1. 模板匹配
+    result = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+    locations = np.where(result >= params['template_threshold'])
+    points = list(zip(*locations[::-1]))
+    
+    # 2. 特徵匹配
     akaze = cv2.AKAZE_create()
     kp1, des1 = akaze.detectAndCompute(screenshot, None)
     kp2, des2 = akaze.detectAndCompute(template, None)
-
+    
     if des1 is not None and des2 is not None:
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         matches = bf.match(des2, des1)
-        matches = sorted(matches, key=lambda x: x.distance)
-        good_matches = [m for m in matches if m.distance < 40]
-
-        if len(good_matches) >= 5:
-            src_pts = np.float32([kp2[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-            dst_pts = np.float32([kp1[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-            M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-
-            if M is not None:
-                h, w = template.shape[:2]
-                pts = np.float32([[0,0], [0,h-1], [w-1,h-1], [w-1,0]]).reshape(-1,1,2)
-                dst = cv2.perspectiveTransform(pts, M)
-                center_x = int(np.mean(dst[:,0,0]))
-                center_y = int(np.mean(dst[:,0,1]))
-                all_matches.append((center_x, center_y, 1.0))
-
-    # 4. 根據顏色資訊篩選 (可選)
-    # ...
-
-    # 5. 後處理 - 群集或 NMS
-    if not all_matches:
-        return []
-
-    points = np.array([(x, y) for x, y, s in all_matches])
+        good_matches = [m for m in matches if m.distance < params['feature_threshold']]
+        
+        if good_matches:
+            matched_points = [kp1[m.trainIdx].pt for m in good_matches]
+            points.extend([(int(x), int(y)) for x, y in matched_points])
     
-    # 使用 DBSCAN 進行群集
-    clustering = DBSCAN(eps=30, min_samples=1).fit(points)
+    # 3. 群集處理
+    if points:
+        points = np.array(points)
+        clustering = DBSCAN(eps=params['cluster_threshold'], min_samples=1).fit(points)
+        
+        final_points = []
+        for label in set(clustering.labels_):
+            if label == -1:
+                continue
+            mask = clustering.labels_ == label
+            cluster_points = points[mask]
+            center = np.mean(cluster_points, axis=0)
+            final_points.append(tuple(map(int, center)))
+        
+        return final_points
     
-    final_points = []
-    for label in set(clustering.labels_):
-        if label == -1:
-            continue
-        mask = clustering.labels_ == label
-        cluster_points = points[mask]
-        center = np.mean(cluster_points, axis=0)
-        final_points.append(tuple(map(int, center)))
-
-    return final_points
+    return []
 
 def check_star_count(screenshot, template):
     """檢查是否找到足夠的5星角色
@@ -522,7 +667,6 @@ def load_test_answers():
                 if not line or line.startswith('#'):
                     continue
                 filename, star_count, matches = line.split('|')
-                matches = set() if matches == '-' else set(matches.split(','))
                 answers[filename] = {
                     'star_count': int(star_count),
                     'matches': matches
@@ -532,113 +676,80 @@ def load_test_answers():
         print("未找到 test_answers.txt")
         return {}
 
-def run_tests():
-    """在沒有顯示器的環境下執行測試"""
-    print("\n開始測試 template_matching 函式...")
+def optimize_parameters(test_cases):
+    """使用網格搜索和多執行緒優化參數"""
+    param_ranges = {
+        'template_threshold': [0.5, 0.55, 0.6, 0.65, 0.7],
+        'feature_threshold': [35, 40, 45, 50],
+        'cluster_threshold': [25, 30, 35, 40]
+    }
     
-    # 載入標準答案
-    answers = load_test_answers()
-    if not answers:
-        print("無法進行準確度驗證")
+    param_combinations = [dict(zip(param_ranges.keys(), v)) 
+                        for v in itertools.product(*param_ranges.values())]
     
-    # 取得所有模板檔案
-    template_files = glob.glob(os.path.join('templates', 't*.png'))
-    if not template_files:
-        print("templates 資料夾中沒有找到 t*.png 檔案。")
-        return
+    print(f"開始優化，共 {len(param_combinations)} 種參數組合")
+    
+    with ThreadPoolExecutor(max_workers=min(os.cpu_count(), 8)) as executor:
+        futures = []
+        for params in param_combinations:
+            future = executor.submit(evaluate_params, params, test_cases)
+            futures.append((params, future))
         
-    # 取得所有截圖檔案
-    screenshot_files = glob.glob(os.path.join('screenshots', '*.png'))
-    if not screenshot_files:
-        print("screenshots 資料夾中沒有 PNG 檔案供測試。")
-        return
+        results = []
+        for params, future in tqdm(futures, desc="評估參數組合"):
+            accuracy = future.result()
+            results.append((params, accuracy))
     
-    # 載入按鈕模板 (不使用 get_btn_folder，直接指定路徑)
-    star_template = cv2.imread('btns/1920/5star.png', cv2.IMREAD_COLOR)
-    if star_template is None:
-        print("無法載入 5star.png 範本")
-        return
+    best_params, best_accuracy = max(results, key=lambda x: x[1])
     
-    print(f"\n找到 {len(template_files)} 個模板檔案")
-    print(f"找到 {len(screenshot_files)} 個測試截圖\n")
+    # 重新評估最佳參數以顯示詳細結果
+    screenshot_files = [case[0] for case in test_cases]
+    template_files = list(set([template for case in test_cases for template in case[1]]))
+    star_template = cv2.imread('btns/1920/5star.png')
     
-    total_tests = 0
-    correct_star_count = 0
-    correct_matches = 0
+    # 將 test_cases 轉換為 answers 格式
+    answers = {}
+    for screenshot_path, template_paths, expected in test_cases:
+        filename = os.path.basename(screenshot_path)
+        answers[filename] = expected
     
-    # 對每個截圖進行測試
-    for screenshot_file in screenshot_files:
-        filename = os.path.basename(screenshot_file)
-        print(f"\n處理截圖：{filename}")
-        
-        screenshot = cv2.imread(screenshot_file, cv2.IMREAD_COLOR)
-        if screenshot is None:
-            continue
-            
-        # 測試5星辨識
-        star_matches = star_matching(screenshot, star_template)
-        detected_star_count = len(star_matches)
-        
-        # 測試角色辨識
-        detected_matches = set()
-        print("\n角色辨識測試:")
-        for template_file in template_files:
-            template = cv2.imread(template_file, cv2.IMREAD_COLOR)
-            if template is None:
-                continue
-            
-            template_name = os.path.basename(template_file).split('.')[0]  # 取得 't1' 這樣的名稱
-            matches = character_matching(screenshot, template)
-            if matches:
-                detected_matches.add(template_name)
-        
-        # 驗證結果
-        if filename in answers:
-            total_tests += 1
-            expected = answers[filename]
-            
-            # 驗證5星數量
-            if detected_star_count == expected['star_count']:
-                correct_star_count += 1
-            
-            # 驗證角色匹配
-            if detected_matches == expected['matches']:
-                correct_matches += 1
-            
-            print(f"\n驗證結果:")
-            print(f"5星數量 - 標準答案: {expected['star_count']}, 偵測結果: {detected_star_count}")
-            print(f"角色匹配 - 標準答案: {expected['matches']}, 偵測結果: {detected_matches}")
-        
-    # 輸出整體準確度
-    if total_tests > 0:
-        print(f"\n測試總結:")
-        print(f"總測試數: {total_tests}")
-        print(f"5星辨識準確率: {(correct_star_count/total_tests)*100:.2f}%")
-        print(f"角色匹配準確率: {(correct_matches/total_tests)*100:.2f}%")
-
-def visualize_matches(screenshot, template, kp1, kp2, good_matches, M):
-    """可視化匹配點和單應性變換"""
-    img_matches = cv2.drawMatches(template, kp2, screenshot, kp1, good_matches, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
-
-    # 繪製單應性變換的結果
-    h, w = template.shape[:2]
-    pts = np.float32([[0,0], [0,h-1], [w-1,h-1], [w-1,0]]).reshape(-1,1,2)
-    dst = cv2.perspectiveTransform(pts, M)
-    img_matches = cv2.polylines(img_matches, [np.int32(dst + (template.shape[1], 0))], True, (255, 0, 0), 3, cv2.LINE_AA)
-
-    cv2.imshow("Matches", img_matches)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    total_tests, correct_stars, correct_matches = evaluate_accuracy(
+        screenshot_files, answers, star_template, template_files,
+        params=best_params,
+        verbose=False
+    )
+    
+    print(f"\n最佳參數組合:")
+    for param, value in best_params.items():
+        print(f"{param}: {value}")
+    print(f"5星辨識準確率: {(correct_stars/total_tests)*100:.2f}%")
+    print(f"角色匹配準確率: {(correct_matches/total_tests)*100:.2f}%")
+    print(f"總體準確率: {best_accuracy*100:.2f}%")
+    
+    save_optimization_params(best_params)
+    return best_params
 
 def main():
     parser = argparse.ArgumentParser(description="Template Matching Script")
     parser.add_argument('--test', action='store_true', help='啟動測試模式')
+    parser.add_argument('--optimize', action='store_true', help='啟動參數優化模式')
     args = parser.parse_args()
 
-    if args.test:
+    if args.optimize:
+        print("啟動參數優化模式...")
+        test_cases = prepare_test_cases()
+        if not test_cases:
+            print("無法找到測試案例，請確認 test_answers.txt 和相關圖片檔案是否存在")
+            return
+        optimize_parameters(test_cases)
+        return
+    elif args.test:
         run_tests()
         return
 
+    # 載入優化後的參數
+    optimal_params = load_optimization_params()
+    
     try:
         # 只在需要時才導入相關模組
         toggle_start_stop()
