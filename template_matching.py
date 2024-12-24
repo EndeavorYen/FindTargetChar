@@ -452,9 +452,34 @@ def rewrite_log(iteration, found):
         print(f"寫入記錄檔時發生錯誤: {e}")
         print("繼續執行腳本...")
 
+def load_test_answers():
+    """載入測試答案"""
+    answers = {}
+    try:
+        with open('test_answers.txt', 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                filename, star_count, matches = line.split('|')
+                matches = set() if matches == '-' else set(matches.split(','))
+                answers[filename] = {
+                    'star_count': int(star_count),
+                    'matches': matches
+                }
+        return answers
+    except FileNotFoundError:
+        print("未找到 test_answers.txt")
+        return {}
+
 def run_tests():
     """在沒有顯示器的環境下執行測試"""
     print("\n開始測試 template_matching 函式...")
+    
+    # 載入標準答案
+    answers = load_test_answers()
+    if not answers:
+        print("無法進行準確度驗證")
     
     # 取得所有模板檔案
     template_files = glob.glob(os.path.join('templates', 't*.png'))
@@ -477,32 +502,59 @@ def run_tests():
     print(f"\n找到 {len(template_files)} 個模板檔案")
     print(f"找到 {len(screenshot_files)} 個測試截圖\n")
     
+    total_tests = 0
+    correct_star_count = 0
+    correct_matches = 0
+    
     # 對每個截圖進行測試
     for screenshot_file in screenshot_files:
-        print(f"\n處理截圖：{screenshot_file}")
+        filename = os.path.basename(screenshot_file)
+        print(f"\n處理截圖：{filename}")
+        
         screenshot = cv2.imread(screenshot_file, cv2.IMREAD_COLOR)
         if screenshot is None:
-            print(f"無法載入截圖：{screenshot_file}")
             continue
             
         # 測試5星辨識
         star_matches = star_matching(screenshot, star_template)
-        print(f"5星辨識結果: 找到 {len(star_matches)} 個匹配點")
-        if star_matches:
-            print(f"匹配座標: {star_matches}")
-            
+        detected_star_count = len(star_matches)
+        
         # 測試角色辨識
+        detected_matches = set()
         print("\n角色辨識測試:")
         for template_file in template_files:
             template = cv2.imread(template_file, cv2.IMREAD_COLOR)
             if template is None:
                 continue
-                
+            
+            template_name = os.path.basename(template_file).split('.')[0]  # 取得 't1' 這樣的名稱
             matches = character_matching(screenshot, template)
-            print(f"{os.path.basename(template_file)}: 找到 {len(matches)} 個匹配點")
             if matches:
-                print(f"匹配座標: {matches}")
-        print("-" * 50)
+                detected_matches.add(template_name)
+        
+        # 驗證結果
+        if filename in answers:
+            total_tests += 1
+            expected = answers[filename]
+            
+            # 驗證5星數量
+            if detected_star_count == expected['star_count']:
+                correct_star_count += 1
+            
+            # 驗證角色匹配
+            if detected_matches == expected['matches']:
+                correct_matches += 1
+            
+            print(f"\n驗證結果:")
+            print(f"5星數量 - 預期: {expected['star_count']}, 實際: {detected_star_count}")
+            print(f"角色匹配 - 預期: {expected['matches']}, 實際: {detected_matches}")
+        
+    # 輸出整體準確度
+    if total_tests > 0:
+        print(f"\n測試總結:")
+        print(f"總測試數: {total_tests}")
+        print(f"5星辨識準確率: {(correct_star_count/total_tests)*100:.2f}%")
+        print(f"角色匹配準確率: {(correct_matches/total_tests)*100:.2f}%")
 
 def main():
     parser = argparse.ArgumentParser(description="Template Matching Script")

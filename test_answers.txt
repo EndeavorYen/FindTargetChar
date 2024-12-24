@@ -1,0 +1,20 @@
+# Format: screenshot_filename|star_count|t1,t2,t3
+# Example: screenshot_20240101_120000.png|2|t1,t3
+# Use '-' for no matches: screenshot_20240101_120000.png|0|-
+
+screenshot_20241223_233859.png|0|-
+screenshot_20241224_000629.png|0|-
+screenshot_20241224_001218.png|0|-
+screenshot_20241224_001219.png|0|-
+screenshot_20241224_012626.png|0|-
+screenshot_20241224_012653.png|0|-
+screenshot_20241224_015322.png|0|-
+screenshot_20241224_015610.png|0|-
+screenshot_20241224_015706.png|0|-
+screenshot_20241224_020119.png|0|-
+screenshot_20241224_020227.png|0|-
+screenshot_20241224_020910.png|0|-
+screenshot_20241224_020937.png|0|-
+screenshot_20241224_030137.png|0|-
+screenshot_20241224_035448.png|0|-
+screenshot_20241224_035454.png|0|-
