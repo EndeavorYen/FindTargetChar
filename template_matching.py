@@ -28,6 +28,16 @@ delay_time = 1.0 # 預設值
 
 width = 3840
 
+stats = {
+    'total_rounds': 0,          # 總抽卡次數
+    'five_star_rounds': 0,      # 抽到五星的次數
+    'target_rounds': 0,         # 抽到目標卡的次數
+    'last_stats_round': 0,      # 上次顯示統計的回合數
+    'start_time': None,         # 開始執行時間
+    'last_round_time': None,    # 上一輪的時間
+    'total_time': 0            # 總執行時間
+}
+
 def get_screen_width():
     """獲取螢幕寬度解析度"""
     try:
@@ -556,7 +566,7 @@ def check_star_count(screenshot, template):
         print(f"未設置5星數量目標，直接進行目標匹配")
         if save_star_screenshot:
             save_screenshot()
-        return True
+        return True, 0
     
     star_count = 0
     points = star_matching(screenshot, template)
@@ -566,13 +576,13 @@ def check_star_count(screenshot, template):
             print(f"已找到 {star_count} 個5星角色，已滿足條件({star_match_count}以上)")
             if save_star_screenshot:
                 save_screenshot()
-            return True
+            return True, star_count
         else:
             print(f"未找到足夠的5星角色，目前找到 {star_count} 個")
-            return False
+            return False, star_count
     else:
         print("未找到任何5星角色")
-        return False
+        return False, 0
 
 def get_template_count():
     """獲取角色資料夾的數量"""
@@ -622,19 +632,33 @@ def load_character_templates():
     
     return character_templates
 
-def check_templates(screenshot, character_templates):
+def save_match_log(filename, star_count, matched_characters):
+    """記錄匹配結果到log檔案
+    Args:
+        filename: 截圖檔名
+        star_count: 五星數量
+        matched_characters: 匹配到的角色列表
+    """
+    try:
+        with open('match_log.txt', 'a', encoding='utf-8') as f:
+            matched_str = ','.join(sorted(matched_characters))
+            f.write(f"{filename}|{star_count}|{matched_str}\n")
+        print(f"已記錄匹配結果到 match_log.txt")
+    except Exception as e:
+        print(f"寫入匹配記錄時發生錯誤: {e}")
+
+def check_templates(screenshot, character_templates, star_count):
     """檢查是否找到足夠的角色圖片
     Args:
         screenshot: 螢幕截圖影像 (BGR 格式)
         character_templates: 角色範本字典，key為角色編號(t1, t2等)，value為該角色的範本圖片列表
     Returns:
         bool: 是否找到足夠的角色圖片
+        int: 找到的目標角色數量
     """
     if target_match_count == 0:
         print(f"未設置目標匹配數量，已滿足條件")
-        if save_target_screenshot:
-            save_screenshot()
-        return True
+        return True, 0
     
     match_count = 0
     matched_characters = set()
@@ -654,19 +678,31 @@ def check_templates(screenshot, character_templates):
         if character_matched:
             matched_characters.add(character_id)
             match_count = len(matched_characters)
+    
+    # 如果找到任何目標角色
+    if match_count > 0:
+        # 使用現有的 save_screenshot 函數儲存截圖
+        save_screenshot()
+        
+        # 取得最新儲存的截圖檔名
+        screenshots_dir = os.path.join(os.getcwd(), "screenshots")
+        files = glob.glob(os.path.join(screenshots_dir, "screenshot_*.png"))
+        if files:
+            latest_file = max(files, key=os.path.getctime)
+            filename = os.path.basename(latest_file)
+            # 記錄到log
+            save_match_log(filename, star_count, matched_characters)
             
-        if match_count >= target_match_count:
-            print(f"已找到 {match_count} 個不同角色，已滿足條件({target_match_count}個以上)")
-            print(f"匹配到的角色：{', '.join(sorted(matched_characters))}")
-            if save_target_screenshot:
-                save_screenshot()
-            return True
+    if match_count >= target_match_count:
+        print(f"已找到 {match_count} 個不同角色，已滿足條件({target_match_count}個以上)")
+        print(f"匹配到的角色：{', '.join(sorted(matched_characters))}")
+        return True, match_count
     
     if match_count == 0:
         print("未找到任何匹配角色")
     else:
         print(f"目前找到 {match_count} 個不同角色：{', '.join(sorted(matched_characters))}")
-    return False
+    return False, match_count
 
 def capture_screenshot(save_to_file=False):
     """擷取螢幕畫面，可選擇是否儲存檔案"""
@@ -720,13 +756,51 @@ def process_buttons_and_templates(retry_template, retry_confirm_template, skip_t
     global delay_time
 
     click_buttons(retry_template, retry_confirm_template, skip_template)
+    stats['total_rounds'] += 1
 
     screenshot = capture_screenshot()
-    if check_star_count(screenshot, star_template):
-        if check_templates(screenshot, templates):
+    found_five_star, star_count = check_star_count(screenshot, star_template)
+    # 直接加上找到的五星數量
+    stats['five_star_rounds'] += star_count
+    
+    if found_five_star:
+        found_target, target_count = check_templates(screenshot, templates, start_count)
+        stats['target_rounds'] += target_count
+        if found_target:
             print("已滿足所有條件。退出...")
+            display_stats()  # 在找到目標時顯示統計
             return True
+        
+    # 每10輪顯示一次統計
+    if stats['total_rounds'] % 10 == 0 and stats['total_rounds'] != stats['last_stats_round']:
+        display_stats()
+        stats['last_stats_round'] = stats['total_rounds']
+
     return False
+
+def display_stats():
+    """顯示統計資訊"""
+    total = stats['total_rounds']
+    if total == 0:
+        return
+        
+    current_time = time.time()
+    total_elapsed = current_time - stats['start_time']
+    avg_time_per_round = total_elapsed / total
+    
+    total_pulls = total * 10  # 總抽數（每輪10抽）
+    five_star_rate = (stats['five_star_rounds'] / total_pulls) * 100  # 修正：用總抽數計算
+    target_rate = (stats['target_rounds'] / total_pulls) * 100  # 修正：用總抽數計算
+    
+    print("\n===== 統計資訊 =====")
+    print(f"總抽卡次數: {total_pulls}抽 ({total}輪)")
+    print(f"五星出現次數: {stats['five_star_rounds']}次")
+    print(f"五星出現機率: {five_star_rate:.2f}%")
+    print(f"目標卡出現次數: {stats['target_rounds']}次")
+    print(f"目標卡出現機率: {target_rate:.2f}%")
+    print(f"執行時間: {total_elapsed:.1f}秒 ({total_elapsed/60:.1f}分鐘)")
+    print(f"平均每輪時間: {avg_time_per_round:.1f}秒")
+    print("==================\n")
 
 def toggle_start_stop():
     """監聽鍵盤事件"""
@@ -751,109 +825,6 @@ def toggle_start_stop():
         listener.start()
     except Exception as e:
         print(f"設置鍵盤監聽時發生錯誤：{e}")
-
-# def get_template_count():
-#     """獲取角色資料夾的數量"""
-#     templates_dir = os.path.join(os.getcwd(), "templates")
-#     if not os.path.exists(templates_dir):
-#         print("templates 資料夾不存在！請確認路徑。")
-#         return 0
-
-#     # 計算 t* 資料夾的數量
-#     folders = [f for f in os.listdir(templates_dir) 
-#               if os.path.isdir(os.path.join(templates_dir, f)) and f.startswith('t')]
-#     return len(folders)
-
-# def load_character_templates():
-#     """載入所有角色的範本圖片
-#     Returns:
-#         dict: 角色編號為key，包含該角色所有範本圖片的列表為value
-#     """
-#     templates_dir = os.path.join(os.getcwd(), "templates")
-#     character_templates = {}
-    
-#     if not os.path.exists(templates_dir):
-#         print("templates 資料夾不存在！")
-#         return character_templates
-    
-#     # 遍歷每個 t* 資料夾
-#     for character_folder in sorted(os.listdir(templates_dir)):
-#         if not character_folder.startswith('t'):
-#             continue
-            
-#         folder_path = os.path.join(templates_dir, character_folder)
-#         if not os.path.isdir(folder_path):
-#             continue
-            
-#         # 載入該角色的所有範本圖片
-#         templates = []
-#         for img_file in sorted(os.listdir(folder_path)):
-#             if img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
-#                 img_path = os.path.join(folder_path, img_file)
-#                 template = cv2.imread(img_path)
-#                 if template is not None:
-#                     templates.append(template)
-#                     print(f"已載入範本：{img_path}")
-        
-#         if templates:
-#             character_templates[character_folder] = templates
-    
-#     return character_templates
-
-def check_templates(screenshot, character_templates):
-    """檢查是否找到足夠的角色圖片
-    Args:
-        screenshot: 螢幕截圖影像 (BGR 格式)
-        character_templates: 角色範本字典，key為角色編號(t1, t2等)，value為該角色的範本圖片列表
-    Returns:
-        bool: 是否找到足夠的角色圖片
-    """
-    if target_match_count == 0:
-        print(f"未設置目標匹配數量，已滿足條件")
-        if save_target_screenshot:
-            save_screenshot()
-        return True
-    
-    match_count = 0
-    matched_characters = set()
-    
-    # 遍歷每個角色
-    for character_id, templates in character_templates.items():
-        character_matched = False
-        
-        # 遍歷該角色的所有範本圖片
-        for template in templates:
-            points = character_matching(screenshot, template)
-            if points:
-                character_matched = True
-                print(f"找到角色 {character_id}")
-                break  # 只要找到該角色的任一範本就可以了
-        
-        if character_matched:
-            matched_characters.add(character_id)
-            match_count = len(matched_characters)
-            
-        if match_count >= target_match_count:
-            print(f"已找到 {match_count} 個不同角色，已滿足條件({target_match_count}個以上)")
-            print(f"匹配到的角色：{', '.join(sorted(matched_characters))}")
-            if save_target_screenshot:
-                save_screenshot()
-            return True
-    
-    if match_count == 0:
-        print("未找到任何匹配角色")
-    else:
-        print(f"目前找到 {match_count} 個不同角色：{', '.join(sorted(matched_characters))}")
-    return False
-
-def rewrite_log(iteration, found):
-    try:
-        date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open('log.txt', 'w', encoding='utf-8') as f:
-            f.write(f"運行次數: {iteration}\n是否符合條件: {found}\n紀錄時間: {date}\n")
-    except Exception as e:
-        print(f"寫入記錄檔時發生錯誤: {e}")
-        print("繼續執行腳本...")
 
 def load_test_answers():
     """載入測試答案"""
@@ -941,6 +912,16 @@ def main():
 
             iteration = 0
             stop_script = False
+            # 重置統計資料
+            stats.update({
+                'total_rounds': 0,
+                'five_star_rounds': 0,
+                'target_rounds': 0,
+                'last_stats_round': 0,
+                'start_time': time.time(),
+                'last_round_time': time.time(),
+                'total_time': 0
+            })
 
             while start_script:
                 iteration += 1
@@ -952,10 +933,11 @@ def main():
                     star_template, 
                     character_templates
                 )
-                rewrite_log(iteration, found)
+
                 if found or stop_script:
                     start_script = False
                     stop_script = True
+                    display_stats()  # 在腳本停止時顯示最終統計
                     break
 
                 time.sleep(0.1)

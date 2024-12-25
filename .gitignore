@@ -1,5 +1,5 @@
 screenshots/*
-log.txt
+*.txt
 templates/*
 *.pyc
 .DS_Store
