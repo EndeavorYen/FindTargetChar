@@ -764,7 +764,7 @@ def process_buttons_and_templates(retry_template, retry_confirm_template, skip_t
     stats['five_star_rounds'] += star_count
     
     if found_five_star:
-        found_target, target_count = check_templates(screenshot, templates, start_count)
+        found_target, target_count = check_templates(screenshot, templates, star_count)
         stats['target_rounds'] += target_count
         if found_target:
             print("已滿足所有條件。退出...")
