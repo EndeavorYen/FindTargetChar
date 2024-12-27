@@ -704,79 +704,173 @@ def check_templates(screenshot, character_templates, star_count):
         print(f"目前找到 {match_count} 個不同角色：{', '.join(sorted(matched_characters))}")
     return False, match_count
 
-def capture_screenshot(save_to_file=False):
-    """擷取螢幕畫面，可選擇是否儲存檔案"""
-    try:
-        # Lazy import
-        import pyautogui
-        screenshot = pyautogui.screenshot()
-        screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-        
-        if save_to_file:
-            screenshots_dir = os.path.join(os.getcwd(), "screenshots")
-            os.makedirs(screenshots_dir, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(screenshots_dir, f"screenshot_{timestamp}.png")
-            cv2.imwrite(filename, screenshot)
-            print(f"已截圖，已存放在目錄: {filename}")
-        
-        return screenshot
-    except Exception as e:
-        print(f"截圖時發生錯誤：{e}")
-        return None
+def capture_screenshot(save_to_file=False, max_retries=3):
+    """擷取螢幕畫面，包含重試機制
+    Args:
+        save_to_file: 是否儲存檔案
+        max_retries: 最大重試次數
+    Returns:
+        numpy.ndarray 或 None: 成功則返回截圖，失敗則返回 None
+    """
+    for attempt in range(max_retries):
+        try:
+            import pyautogui
+            screenshot = pyautogui.screenshot()
+            if screenshot is None:
+                raise Exception("截圖結果為空")
+                
+            # 轉換為 OpenCV 格式
+            screenshot_cv = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+            
+            if save_to_file:
+                try:
+                    screenshots_dir = os.path.join(os.getcwd(), "screenshots")
+                    os.makedirs(screenshots_dir, exist_ok=True)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = os.path.join(screenshots_dir, f"screenshot_{timestamp}.png")
+                    cv2.imwrite(filename, screenshot_cv)
+                    print(f"已截圖，已存放在目錄: {filename}")
+                except Exception as save_error:
+                    print(f"儲存截圖時發生錯誤：{save_error}")
+                    # 儲存失敗不影響程序繼續執行
+            
+            return screenshot_cv
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"截圖失敗 (嘗試 {attempt + 1}/{max_retries}): {str(e)}")
+                time.sleep(1)  # 等待一秒後重試
+            else:
+                print(f"截圖最終失敗: {str(e)}")
+                return None
 
-# 為了向後相容，可以保留save_screenshot函數
-def save_screenshot():
-    capture_screenshot(save_to_file=True)
-
-
-def click_buttons( retry_template, retry_confirm_template, skip_template):
-    """點擊按鈕操作
+def click_buttons(retry_template, retry_confirm_template, skip_template, max_retries=3, retry_delay=0.5):
+    """點擊按鈕操作，包含完整循環重試機制
     Args:
         retry_template: 重試按鈕範例圖片
         retry_confirm_template: 重試確認按鈕範例圖片
         skip_template: 跳過按鈕範例圖片
+        max_retries: 整個循環的最大重試次數
+        retry_delay: 重試間隔時間(秒)
     Returns:
-        bool: 是否成功點擊按鈕
+        bool: 是否成功完成所有按鈕點擊
     """
     import pyautogui
     global delay_time
-    for btn, btn_name in [(retry_template, "retry"), (retry_confirm_template, "retry_confirm"), (skip_template, "skip")]:
-        screenshot = capture_screenshot()
-        points = btn_matching(screenshot, btn)
-        if not points:
-            print(f"未找到{btn_name}按鈕")
+    
+    buttons = [
+        (retry_template, "retry"),
+        (retry_confirm_template, "retry_confirm"),
+        (skip_template, "skip")
+    ]
+    
+    cycle_attempts = 0
+    while cycle_attempts < max_retries:
+        cycle_success = True  # 追蹤當前循環是否成功
+        completed_buttons = []  # 記錄已完成的按鈕
+        
+        # 嘗試完成一個完整的按鈕循環
+        for btn, btn_name in buttons:
+            button_attempts = 0
+            max_button_attempts = 2  # 每個按鈕的最大重試次數
+            
+            while button_attempts < max_button_attempts:
+                screenshot = capture_screenshot()
+                if screenshot is None:
+                    print(f"無法獲取截圖，跳過{btn_name}按鈕")
+                    cycle_success = False
+                    break
+                    
+                try:
+                    points = btn_matching(screenshot, btn)
+                    
+                    if points:
+                        try:
+                            pyautogui.click(points[0])
+                            print(f"已點擊{btn_name}按鈕")
+                            completed_buttons.append(btn_name)
+                            time.sleep(delay_time)
+                            break  # 成功點擊，進入下一個按鈕
+                        except Exception as click_error:
+                            print(f"點擊{btn_name}按鈕時發生錯誤: {click_error}")
+                            button_attempts += 1
+                    else:
+                        # 如果是已完成的按鈕找不到，可能是正常的
+                        if btn_name in completed_buttons:
+                            print(f"{btn_name}按鈕已經處理過，繼續下一步")
+                            break
+                        
+                        button_attempts += 1
+                        if button_attempts < max_button_attempts:
+                            print(f"未找到{btn_name}按鈕，第{button_attempts}次重試...")
+                            time.sleep(retry_delay)
+                        else:
+                            print(f"在{max_button_attempts}次嘗試後仍未找到{btn_name}按鈕")
+                            cycle_success = False
+                            
+                except Exception as e:
+                    print(f"處理{btn_name}按鈕時發生錯誤: {e}")
+                    cycle_success = False
+                    break
+            
+            if not cycle_success:
+                break
+        
+        # 檢查本次循環是否成功
+        if cycle_success:
+            print("成功完成所有按鈕操作")
+            return True
+            
+        # 如果循環失敗，等待後重試
+        cycle_attempts += 1
+        if cycle_attempts < max_retries:
+            print(f"第{cycle_attempts}次循環失敗，已完成的按鈕: {completed_buttons}")
+            print(f"等待 {retry_delay * 2} 秒後重試完整循環...")
+            time.sleep(retry_delay * 2)
+        else:
+            print(f"在{max_retries}次嘗試後仍未能完成按鈕循環")
             return False
-        pyautogui.click(points[0])
-        print(f"已點擊{btn_name}按鈕")
-        time.sleep(delay_time)  # 根據電腦效能修改,建議為 1~2秒
+    
+    return False
 
 def process_buttons_and_templates(retry_template, retry_confirm_template, skip_template, star_template, templates):
     global stop_script
     global delay_time
 
-    click_buttons(retry_template, retry_confirm_template, skip_template)
-    stats['total_rounds'] += 1
+    try:
+        # 如果按鈕點擊失敗，等待短暫時間後重試
+        if not click_buttons(retry_template, retry_confirm_template, skip_template):
+            print("按鈕點擊失敗，等待 3 秒後重試...")
+            time.sleep(3)
+            return False
+            
+        stats['total_rounds'] += 1
 
-    screenshot = capture_screenshot()
-    found_five_star, star_count = check_star_count(screenshot, star_template)
-    # 直接加上找到的五星數量
-    stats['five_star_rounds'] += star_count
-    
-    if found_five_star:
-        found_target, target_count = check_templates(screenshot, templates, start_count)
-        stats['target_rounds'] += target_count
-        if found_target:
-            print("已滿足所有條件。退出...")
-            display_stats()  # 在找到目標時顯示統計
-            return True
+        screenshot = capture_screenshot()
+        if screenshot is None:
+            print("無法獲取截圖進行模板匹配，跳過本次檢查")
+            return False
+            
+        found_five_star, star_count = check_star_count(screenshot, star_template)
+        stats['five_star_rounds'] += star_count
         
-    # 每10輪顯示一次統計
-    if stats['total_rounds'] % 10 == 0 and stats['total_rounds'] != stats['last_stats_round']:
-        display_stats()
-        stats['last_stats_round'] = stats['total_rounds']
+        if found_five_star:
+            found_target, target_count = check_templates(screenshot, templates, star_count)
+            stats['target_rounds'] += target_count
+            if found_target:
+                print("已滿足所有條件。退出...")
+                display_stats()
+                return True
+            
+        if stats['total_rounds'] % 10 == 0 and stats['total_rounds'] != stats['last_stats_round']:
+            display_stats()
+            stats['last_stats_round'] = stats['total_rounds']
 
-    return False
+        return False
+        
+    except Exception as e:
+        print(f"處理按鈕和模板時發生錯誤: {e}")
+        return False
 
 def display_stats():
     """顯示統計資訊"""
