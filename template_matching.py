@@ -76,6 +76,7 @@ def load_config():
         return {
             "star_count": config.getint('Settings', 'star_count', fallback=3),
             "target_count": config.getint('Settings', 'target_count', fallback=1),
+            "max_star_count": config.getint('Settings', 'max_star_count', fallback=0),
             "save_star_screenshot": config.getboolean('Settings', 'save_star_screenshot', fallback=True),
             "save_target_screenshot": config.getboolean('Settings', 'save_target_screenshot', fallback=True),
             "delay_time": config.getfloat('Settings', 'delay_time', fallback=1.0),
@@ -86,6 +87,7 @@ def load_config():
         return {
             "star_count": 3,
             "target_count": 1,
+            "max_star_count": 0,
             "save_star_screenshot": True,
             "save_target_screenshot": True,
             "delay_time": 1.0,
@@ -836,6 +838,7 @@ def click_buttons(retry_template, retry_confirm_template, skip_template, max_ret
 def process_buttons_and_templates(retry_template, retry_confirm_template, skip_template, star_template, templates):
     global stop_script
     global delay_time
+    global max_star_count
 
     try:
         # 如果按鈕點擊失敗，等待短暫時間後重試
@@ -853,6 +856,12 @@ def process_buttons_and_templates(retry_template, retry_confirm_template, skip_t
             
         found_five_star, star_count = check_star_count(screenshot, star_template)
         stats['five_star_rounds'] += star_count
+        
+        # 檢查是否達到 max_star_count
+        if max_star_count > 0 and stats['five_star_rounds'] >= max_star_count:
+            print(f"已達到最大五星數量 {max_star_count}，終止腳本...")
+            display_stats()
+            return True
         
         if found_five_star:
             found_target, target_count = check_templates(screenshot, templates, star_count)
@@ -971,6 +980,7 @@ def main():
         config = load_config()
         star_match_count = config.get('star_count', 3)
         target_match_count = config.get('target_count', 1)
+        max_star_count = config.get('max_star_count', 0)
         save_star_screenshot = config.get('save_star_screenshot', True)
         save_target_screenshot = config.get('save_target_screenshot', True)
         delay_time = config.get('delay_time', 1)
@@ -979,6 +989,7 @@ def main():
 設定資訊：
 - 5 星數量目標: {star_match_count}
 - 目標匹配數量: {target_match_count}
+- 最大五星數量: {max_star_count}
 - 5星數量達標時截圖: {save_star_screenshot}
 - 目標匹配達標時截圖: {save_target_screenshot}
 - 延遲時間: {delay_time}
