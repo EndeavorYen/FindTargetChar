@@ -22,6 +22,7 @@ start_script = False
 
 star_match_count = 3  # 預設值
 target_match_count = 1  # 預設值
+max_star_count = 0  # 新增預設值
 save_star_screenshot = True  # 預設值
 save_target_screenshot = False  # 預設值
 delay_time = 1.0 # 預設值
@@ -424,7 +425,7 @@ def run_tests():
         print(f"\n測試總結:")
         print(f"總測試數: {total_tests}")
         print(f"5星辨識準確率: {star_accuracy*100:.2f}%")
-        print(f"角色匹配準確率: {match_accuracy*100:.2f}%")
+        print(f"角色��配準確率: {match_accuracy*100:.2f}%")
         print(f"總分: {match_accuracy*100:.2f}%")
 
 def evaluate_params(args):
@@ -707,13 +708,7 @@ def check_templates(screenshot, character_templates, star_count):
     return False, match_count
 
 def capture_screenshot(save_to_file=False, max_retries=3):
-    """擷取螢幕畫面，包含重試機制
-    Args:
-        save_to_file: 是否儲存檔案
-        max_retries: 最大重試次數
-    Returns:
-        numpy.ndarray 或 None: 成功則返回截圖，失敗則返回 None
-    """
+    """擷取螢幕畫面，包含重試機制"""
     for attempt in range(max_retries):
         try:
             import pyautogui
@@ -730,11 +725,14 @@ def capture_screenshot(save_to_file=False, max_retries=3):
                     os.makedirs(screenshots_dir, exist_ok=True)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = os.path.join(screenshots_dir, f"screenshot_{timestamp}.png")
-                    cv2.imwrite(filename, screenshot_cv)
-                    print(f"已截圖，已存放在目錄: {filename}")
+                    # 直接使用 cv2.imwrite 儲存圖片
+                    success = cv2.imwrite(filename, screenshot_cv)
+                    if success:
+                        print(f"已截圖，已存放在目錄: {filename}")
+                    else:
+                        print("儲存截圖失敗")
                 except Exception as save_error:
                     print(f"儲存截圖時發生錯誤：{save_error}")
-                    # 儲存失敗不影響程序繼續執行
             
             return screenshot_cv
             
@@ -745,6 +743,10 @@ def capture_screenshot(save_to_file=False, max_retries=3):
             else:
                 print(f"截圖最終失敗: {str(e)}")
                 return None
+            
+# 為了向後相容，可以保留save_screenshot函數
+def save_screenshot():
+    capture_screenshot(save_to_file=True)
 
 def click_buttons(retry_template, retry_confirm_template, skip_template, max_retries=3, retry_delay=0.5):
     """點擊按鈕操作，包含完整循環重試機制
@@ -836,12 +838,10 @@ def click_buttons(retry_template, retry_confirm_template, skip_template, max_ret
     return False
 
 def process_buttons_and_templates(retry_template, retry_confirm_template, skip_template, star_template, templates):
-    global stop_script
-    global delay_time
-    global max_star_count
-
+    """處理按鈕和模板匹配"""
+    global stop_script, delay_time, max_star_count, stats
+    
     try:
-        # 如果按鈕點擊失敗，等待短暫時間後重試
         if not click_buttons(retry_template, retry_confirm_template, skip_template):
             print("按鈕點擊失敗，等待 3 秒後重試...")
             time.sleep(3)
