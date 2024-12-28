@@ -581,10 +581,10 @@ def check_star_count(screenshot, template):
                 save_screenshot()
             return True, star_count
         else:
-            print(f"未找到足夠的5星角色，目前找到 {star_count} 個")
+            #print(f"未找到足夠的5星角色，目前找到 {star_count} 個")
             return False, star_count
     else:
-        print("未找到任何5星角色")
+        #print("未找到任何5星角色")
         return False, 0
 
 def get_template_count():
@@ -791,7 +791,7 @@ def click_buttons(retry_template, retry_confirm_template, skip_template, max_ret
                     if points:
                         try:
                             pyautogui.click(points[0])
-                            print(f"已點擊{btn_name}按鈕")
+                            #print(f"已點擊{btn_name}按鈕")
                             completed_buttons.append(btn_name)
                             time.sleep(delay_time)
                             break  # 成功點擊，進入下一個按鈕
@@ -822,7 +822,7 @@ def click_buttons(retry_template, retry_confirm_template, skip_template, max_ret
         
         # 檢查本次循環是否成功
         if cycle_success:
-            print("成功完成所有按鈕操作")
+            #print("成功完成所有按鈕操作")
             return True
             
         # 如果循環失敗，等待後重試
@@ -871,7 +871,7 @@ def process_buttons_and_templates(retry_template, retry_confirm_template, skip_t
                 display_stats()
                 return True
             
-        if stats['total_rounds'] % 10 == 0 and stats['total_rounds'] != stats['last_stats_round']:
+        if stats['total_rounds'] % 100 == 0 and stats['total_rounds'] != stats['last_stats_round']:
             display_stats()
             stats['last_stats_round'] = stats['total_rounds']
 
@@ -1030,7 +1030,7 @@ def main():
 
             while start_script:
                 iteration += 1
-                print(f"運行次數 {iteration}")
+                #print(f"運行次數 {iteration}")
                 found = process_buttons_and_templates(
                     retry_template, 
                     retry_confirm_template, 
